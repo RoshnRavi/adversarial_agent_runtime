@@ -1,0 +1,4 @@
+id: S10
+name: Parallel tool calls with failure and hang
+description: "Parallel tool calls where exactly one fails and one hangs."
+messages: []

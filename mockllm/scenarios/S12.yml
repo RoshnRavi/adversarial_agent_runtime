@@ -1,0 +1,4 @@
+id: S12
+name: Partial interrupted parallel turn
+description: "Emits a partial, interrupted turn after the first of three parallel tool calls."
+messages: []

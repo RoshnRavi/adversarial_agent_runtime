@@ -1,0 +1,4 @@
+id: S03
+name: Unknown tool and wrong typed argument
+description: "Calls a tool that does not exist; calls a real tool with a wrong-typed argument."
+messages: []

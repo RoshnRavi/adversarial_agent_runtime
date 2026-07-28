@@ -1,0 +1,4 @@
+id: S05
+name: Connection reset mid-response
+description: "Connection reset mid-response, at a random byte offset."
+messages: []

@@ -1,0 +1,4 @@
+id: S11
+name: Confident false success claim
+description: "Confidently wrong: claims a tool succeeded when it returned an error."
+messages: []

@@ -1,0 +1,4 @@
+id: S09
+name: Duplicate tool use IDs
+description: "Duplicate tool_use ids reused across turns."
+messages: []

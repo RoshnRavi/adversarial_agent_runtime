@@ -1,0 +1,4 @@
+id: S06
+name: Retryable rate/server errors
+description: "429 with Retry-After, then 529, then 200."
+messages: []

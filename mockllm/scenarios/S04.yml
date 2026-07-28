@@ -1,0 +1,4 @@
+id: S04
+name: Infinite loop
+description: "Infinite loop: same tool, same arguments, forever."
+messages: []
