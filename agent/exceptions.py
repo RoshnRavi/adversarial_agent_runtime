@@ -1,25 +1,53 @@
-"""Custom errors for the agent runtime."""
+"""Structured errors for the custom agent runtime."""
+
 
 class AgentError(Exception):
-    """The main error class for all agent errors."""
-    pass
+    """Base class for runtime errors surfaced to the CLI and traces."""
+
+
+class AgentBaseError(AgentError):
+    """Compatibility alias used by older loop code."""
+
 
 class NetworkFailureError(AgentError):
-    """Raised when the mockllm server connection fails."""
-    pass
+    """Raised when the mock LLM server cannot be reached or returns bad data."""
 
-class CircuitBreakerOpenError(AgentError):
-    """Raised when the Circuit Breaker stops network calls."""
-    pass
+
+class NetworkError(NetworkFailureError):
+    """Compatibility alias for network failures."""
+
+
+class CircuitBreakerOpenError(NetworkFailureError):
+    """Raised when the circuit breaker refuses network calls."""
+
 
 class ContextLimitExceededError(AgentError):
-    """Raised when the 8,000 token limit is reached."""
-    pass
+    """Raised when the 8,000-token context ceiling cannot be preserved."""
+
+
+class MemoryLimitError(ContextLimitExceededError):
+    """Compatibility alias for context budget failures."""
+
 
 class SecurityViolationError(AgentError):
-    """Raised when the AI tries a prompt injection or bad file path."""
-    pass
+    """Raised when a tool request violates the runtime security boundary."""
+
 
 class MaxStepsReachedError(AgentError):
-    """Raised when the agent gets stuck in an infinite loop."""
-    pass
+    """Raised when the agent reaches the configured step ceiling."""
+
+
+class NoProgressError(AgentError):
+    """Raised when the agent repeats the same tool call without progress."""
+
+
+class ToolArgumentError(AgentError):
+    """Raised when a model emits malformed or wrong-typed tool arguments."""
+
+
+class ToolExecutionError(AgentError):
+    """Raised when a tool fails in a controlled, model-legible way."""
+
+
+class ReplayError(AgentError):
+    """Raised when a recorded run cannot be replayed."""
