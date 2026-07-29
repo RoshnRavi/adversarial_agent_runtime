@@ -44,6 +44,8 @@ class AgentDatabase:
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL;")
+        self.conn.execute("PRAGMA synchronous=FULL;")
+        self.conn.execute("PRAGMA busy_timeout=5000;")
         self.conn.execute("PRAGMA foreign_keys=ON;")
         self._create_tables()
 
@@ -194,15 +196,74 @@ class AgentDatabase:
                 (run_id, next_status, next_step),
             )
 
+    def update_run_and_append_event(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        status: str | None = None,
+        step_count: int | None = None,
+        termination_reason: str | None = None,
+        pending_tool_calls: list[dict[str, Any]] | None = None,
+        step: int | None = None,
+        idempotency_key: str | None = None,
+    ) -> int | None:
+        current = self.get_run(run_id)
+        if current is None:
+            raise KeyError(f"Unknown run_id: {run_id}")
+        next_status = status if status is not None else current.status
+        next_step = step_count if step_count is not None else current.step_count
+        next_reason = (
+            termination_reason if termination_reason is not None else current.termination_reason
+        )
+        pending = (
+            stable_json(pending_tool_calls)
+            if pending_tool_calls is not None
+            else stable_json(current.pending_tool_calls)
+        )
+        event = Event(
+            run_id=run_id,
+            event_type=event_type,
+            payload=payload or {},
+            step=step,
+            idempotency_key=idempotency_key,
+        )
+        with self.conn:
+            self.conn.execute(
+                """
+                UPDATE runs
+                SET status = ?, step_count = ?, termination_reason = ?,
+                    pending_tool_calls = ?, updated_at = ?
+                WHERE run_id = ?
+                """,
+                (next_status, next_step, next_reason, pending, time.time(), run_id),
+            )
+            self.conn.execute(
+                """
+                INSERT INTO run_states (run_id, current_state, step_count)
+                VALUES (?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    current_state = excluded.current_state,
+                    step_count = excluded.step_count
+                """,
+                (run_id, next_status, next_step),
+            )
+            cursor = self._insert_event(event)
+        return int(cursor.lastrowid) if cursor.rowcount else None
+
     def finish_run(self, run_id: str, reason: str, *, step_count: int | None = None) -> None:
-        self.update_run(
+        self.update_run_and_append_event(
             run_id,
+            "run_finished",
+            {"reason": reason},
             status="FINISHED",
             step_count=step_count,
             termination_reason=reason,
             pending_tool_calls=[],
+            step=step_count,
+            idempotency_key=f"{run_id}:run_finished",
         )
-        self.append_event(run_id, "run_finished", {"reason": reason}, step=step_count)
 
     def append_event(
         self,
@@ -220,26 +281,27 @@ class AgentDatabase:
             step=step,
             idempotency_key=idempotency_key,
         )
-        try:
-            with self.conn:
-                cursor = self.conn.execute(
-                    """
-                    INSERT INTO events
-                        (run_id, event_type, payload_json, step, idempotency_key, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event.run_id,
-                        event.event_type,
-                        stable_json(event.payload),
-                        event.step,
-                        event.idempotency_key,
-                        event.created_at,
-                    ),
-                )
-            return int(cursor.lastrowid)
-        except sqlite3.IntegrityError:
-            return None
+        with self.conn:
+            cursor = self._insert_event(event)
+        return int(cursor.lastrowid) if cursor.rowcount else None
+
+    def _insert_event(self, event: Event) -> sqlite3.Cursor:
+        verb = "INSERT OR IGNORE" if event.idempotency_key is not None else "INSERT"
+        return self.conn.execute(
+            f"""
+            {verb} INTO events
+                (run_id, event_type, payload_json, step, idempotency_key, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                event.run_id,
+                event.event_type,
+                stable_json(event.payload),
+                event.step,
+                event.idempotency_key,
+                event.created_at,
+            ),
+        )
 
     def get_events(self, run_id: str) -> list[Event]:
         rows = self.conn.execute(
@@ -403,6 +465,63 @@ class AgentDatabase:
             "created_at": row["created_at"],
         }
 
+    def send_email_tool_once(
+        self,
+        *,
+        idempotency_key: str,
+        run_id: str,
+        tool_call_id: str,
+        arguments: dict[str, Any],
+        to: str,
+        subject: str,
+        body: str,
+    ) -> dict[str, Any]:
+        now = time.time()
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT OR IGNORE INTO sent_emails
+                    (idempotency_key, run_id, recipient, subject, body, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (idempotency_key, run_id, to, subject, body, now),
+            )
+            row = self.conn.execute(
+                "SELECT * FROM sent_emails WHERE idempotency_key = ?",
+                (idempotency_key,),
+            ).fetchone()
+            result = {
+                "status": "queued",
+                "idempotency_key": row["idempotency_key"],
+                "to": row["recipient"],
+                "subject": row["subject"],
+                "body": row["body"],
+                "created_at": row["created_at"],
+            }
+            self.conn.execute(
+                """
+                INSERT INTO tool_executions
+                    (idempotency_key, run_id, tool_call_id, tool_name, args_json,
+                     result_json, error, status, created_at, updated_at)
+                VALUES (?, ?, ?, 'send_email', ?, ?, NULL, 'completed', ?, ?)
+                ON CONFLICT(idempotency_key) DO UPDATE SET
+                    result_json = excluded.result_json,
+                    error = NULL,
+                    status = 'completed',
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    idempotency_key,
+                    run_id,
+                    tool_call_id,
+                    stable_json(arguments),
+                    stable_json(result),
+                    now,
+                    now,
+                ),
+            )
+        return result
+
     def count_sent_emails(self, run_id: str | None = None) -> int:
         if run_id is None:
             row = self.conn.execute("SELECT COUNT(*) AS count FROM sent_emails").fetchone()
@@ -452,9 +571,21 @@ class TraceReader:
     def read(self, run_id: str) -> Iterator[dict[str, Any]]:
         path = self.directory / f"{run_id}.jsonl"
         with path.open(encoding="utf-8") as handle:
-            for line in handle:
-                if line.strip():
-                    yield json.loads(line)
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ReplayError(
+                        f"Malformed trace line {line_number} for run_id {run_id}: {exc.msg}"
+                    ) from exc
+                if not isinstance(event, dict):
+                    raise ReplayError(
+                        f"Malformed trace line {line_number} for run_id {run_id}: "
+                        "event must be an object"
+                    )
+                yield event
 
 
 class Replayer:
@@ -464,16 +595,93 @@ class Replayer:
     def replay(self, run_id: str) -> list[str]:
         try:
             events = list(self.reader.read(run_id))
-        except FileNotFoundError as exc:
+        except OSError as exc:
             raise ReplayError(f"No trace found for run_id {run_id}") from exc
 
         lines: list[str] = []
         for event in events:
-            step = event.get("step")
-            prefix = f"step {step}: " if step is not None else ""
-            lines.append(f"{prefix}{event.get('event_type')} {event.get('payload', {})}")
+            lines.append(_format_replay_event(event))
         return lines
 
 
 def replay_run(run_id: str) -> str:
     return "\n".join(Replayer().replay(run_id))
+
+
+def _format_replay_event(event: dict[str, Any]) -> str:
+    event_type = str(event.get("event_type", "unknown"))
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        payload = {}
+    prefix = _step_prefix(event.get("step"))
+
+    if event_type == "run_started":
+        return f"{prefix}run_started task={stable_json(payload.get('task', ''))}"
+    if event_type == "llm_request":
+        return (
+            f"{prefix}llm_request messages={payload.get('message_count')} "
+            f"tokens={payload.get('tokens')}"
+        )
+    if event_type == "retry":
+        return (
+            f"{prefix}retry attempt={payload.get('attempt')} "
+            f"reason={stable_json(payload.get('reason', ''))} "
+            f"delay_seconds={payload.get('delay_seconds')}"
+        )
+    if event_type == "loop_control":
+        return (
+            f"{prefix}loop_control decision={stable_json(payload.get('decision', ''))} "
+            f"payload={stable_json(payload)}"
+        )
+    if event_type == "budget_charged":
+        return (
+            f"{prefix}budget_charged step_cost={payload.get('step_cost')} "
+            f"total_cost={payload.get('total_cost')} budget={payload.get('budget')}"
+        )
+    if event_type == "llm_response":
+        return f"{prefix}llm_response {stable_json(payload)}"
+    if event_type == "assistant_message":
+        return f"{prefix}assistant_message content={stable_json(payload.get('content', ''))}"
+    if event_type == "tool_parse_error":
+        return f"{prefix}tool_parse_error error={stable_json(payload.get('error', ''))}"
+    if event_type == "tool_calls_parsed":
+        tool_calls = payload.get("tool_calls")
+        count = len(tool_calls) if isinstance(tool_calls, list) else 0
+        return f"{prefix}tool_calls_parsed count={count} calls={stable_json(tool_calls or [])}"
+    if event_type == "tool_execution_started":
+        tool_call = payload.get("tool_call")
+        if not isinstance(tool_call, dict):
+            tool_call = {}
+        return (
+            f"{prefix}tool_execution_started name={stable_json(tool_call.get('name', ''))} "
+            f"id={stable_json(tool_call.get('id', ''))} "
+            f"arguments={stable_json(tool_call.get('arguments', {}))}"
+        )
+    if event_type == "tool_result":
+        return (
+            f"{prefix}tool_result name={stable_json(payload.get('tool_name', ''))} "
+            f"id={stable_json(payload.get('tool_call_id', ''))} "
+            f"ok={payload.get('ok')} result={stable_json(payload.get('result'))} "
+            f"error={stable_json(payload.get('error'))}"
+        )
+    if event_type == "model_contradiction":
+        return (
+            f"{prefix}model_contradiction "
+            f"reason={stable_json(payload.get('reason', ''))} "
+            f"targets={stable_json(payload.get('matched_targets', []))}"
+        )
+    if event_type == "partial_tool_turn":
+        return (
+            f"{prefix}partial_tool_turn "
+            f"expected={payload.get('expected_tool_call_count')} "
+            f"parsed={payload.get('parsed_tool_call_count')}"
+        )
+    if event_type == "run_finished":
+        return f"{prefix}run_finished reason={stable_json(payload.get('reason', ''))}"
+    return f"{prefix}{event_type} {stable_json(payload)}"
+
+
+def _step_prefix(step: Any) -> str:
+    if step is None:
+        return "step ?: "
+    return f"step {step}: "
