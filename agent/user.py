@@ -36,6 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Start a new task")
+    run_parser.add_argument("--run-id", help="Optional deterministic run id")
     run_parser.add_argument("--task", required=True, help="Task for the agent")
 
     resume_parser = subparsers.add_parser("resume", help="Resume an existing run")
@@ -71,7 +72,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         runtime = _build_runtime(config, db_instance)
         if args.command == "run":
-            state = runtime.start_task(args.task)
+            state = (
+                runtime.run_task(args.run_id, args.task)
+                if args.run_id
+                else runtime.start_task(args.task)
+            )
             print(f"run_id={state.run_id}")
         elif args.command == "resume":
             state = runtime.resume(args.run_id)
