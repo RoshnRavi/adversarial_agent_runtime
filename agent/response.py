@@ -26,6 +26,8 @@ class ParsedAgentResponse:
     assistant_text: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     parse_errors: list[str] = field(default_factory=list)
+    partial_turn: bool = False
+    expected_tool_call_count: int | None = None
 
 
 def parse_agent_response(response: dict[str, Any], step: int) -> ParsedAgentResponse:
@@ -34,6 +36,8 @@ def parse_agent_response(response: dict[str, Any], step: int) -> ParsedAgentResp
         assistant_text=_assistant_text(response),
         tool_calls=tool_calls,
         parse_errors=parse_errors,
+        partial_turn=_is_partial_turn(response),
+        expected_tool_call_count=_expected_tool_call_count(response),
     )
 
 
@@ -112,6 +116,32 @@ def _assistant_text(response: dict[str, Any]) -> str:
         ]
         return "\n".join(part for part in parts if part)
     return str(response.get("message", ""))
+
+
+def _is_partial_turn(response: dict[str, Any]) -> bool:
+    finish_reason = response.get("finish_reason")
+    interrupted_reasons = {
+        "interrupted",
+        "partial",
+        "partial_tool_calls",
+        "tool_call_interrupted",
+        "tool_calls_interrupted",
+    }
+    return (
+        response.get("partial") is True
+        or response.get("interrupted") is True
+        or finish_reason in interrupted_reasons
+    )
+
+
+def _expected_tool_call_count(response: dict[str, Any]) -> int | None:
+    raw_count = response.get("expected_tool_call_count")
+    if isinstance(raw_count, int) and not isinstance(raw_count, bool) and raw_count > 0:
+        return raw_count
+    expected_calls = response.get("expected_tool_calls")
+    if isinstance(expected_calls, list) and expected_calls:
+        return len(expected_calls)
+    return None
 
 
 def _try_parse_json(text: str) -> Any:
