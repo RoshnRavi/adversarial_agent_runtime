@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import time
@@ -13,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from .exceptions import CircuitBreakerOpenError, NetworkFailureError
 from .response import ToolCall, parse_agent_response
-from .runtime import DEFAULT_CONFIG, RuntimeConfig
+from .runtime import DEFAULT_CONFIG, RuntimeConfig, stable_json
 
 if TYPE_CHECKING:
     from .message import MemoryManager
@@ -149,6 +150,8 @@ class ValidatedAgentResponse:
     assistant_text: str
     tool_calls: list[ToolCall] = field(default_factory=list)
     parse_errors: list[str] = field(default_factory=list)
+    partial_turn: bool = False
+    expected_tool_call_count: int | None = None
     raw_response: dict[str, Any] = field(default_factory=dict)
     message_count: int = 0
     token_count: int = 0
@@ -178,36 +181,106 @@ class AgentValidator:
         context = memory.get_compacted_context()
         token_count = memory.estimated_tokens()
         llm_request_payload = {"message_count": len(context), "tokens": token_count}
-        self.db.append_event(run_id, "llm_request", llm_request_payload, step=step)
-        self.tracer.log_trace(run_id, "llm_request", llm_request_payload, step=step)
+        request_inserted = self.db.append_event(
+            run_id,
+            "llm_request",
+            llm_request_payload,
+            step=step,
+            idempotency_key=f"{run_id}:llm_request:{step}",
+        )
+        if request_inserted is not None:
+            self.tracer.log_trace(run_id, "llm_request", llm_request_payload, step=step)
 
         response = self.llm_client.call({"messages": context, "task": task, "step": step})
         for retry in getattr(self.llm_client, "last_retries", []):
             self.tracer.log_trace(run_id, "retry", _retry_payload(retry), step=step)
-        self.db.append_event(run_id, "llm_response", response, step=step)
-        self.tracer.log_trace(run_id, "llm_response", response, step=step)
+        response_inserted = self.db.append_event(
+            run_id,
+            "llm_response",
+            response,
+            step=step,
+            idempotency_key=f"{run_id}:llm_response:{step}",
+        )
+        if response_inserted is not None:
+            self.tracer.log_trace(run_id, "llm_response", response, step=step)
 
+        return self._record_parsed_response(
+            run_id,
+            step=step,
+            memory=memory,
+            response=response,
+            message_count=len(context),
+            token_count=token_count,
+        )
+
+    def validate_recorded_response(
+        self,
+        run_id: str,
+        *,
+        step: int,
+        memory: MemoryManager,
+        response: dict[str, Any],
+        message_count: int,
+        token_count: int,
+    ) -> ValidatedAgentResponse:
+        return self._record_parsed_response(
+            run_id,
+            step=step,
+            memory=memory,
+            response=response,
+            message_count=message_count,
+            token_count=token_count,
+        )
+
+    def _record_parsed_response(
+        self,
+        run_id: str,
+        *,
+        step: int,
+        memory: MemoryManager,
+        response: dict[str, Any],
+        message_count: int,
+        token_count: int,
+    ) -> ValidatedAgentResponse:
         parsed_response = parse_agent_response(response, step)
         if parsed_response.assistant_text:
-            memory.add_assistant_message(parsed_response.assistant_text)
-            self.db.append_event(
+            payload = {"content": parsed_response.assistant_text}
+            inserted = self.db.append_event(
                 run_id,
                 "assistant_message",
-                {"content": parsed_response.assistant_text},
+                payload,
                 step=step,
+                idempotency_key=_event_key(run_id, "assistant_message", step, payload),
             )
+            if inserted is not None:
+                memory.add_assistant_message(parsed_response.assistant_text)
+                self.tracer.log_trace(run_id, "assistant_message", payload, step=step)
 
-        for error in parsed_response.parse_errors:
+        for index, error in enumerate(parsed_response.parse_errors):
             payload = {"error": error}
-            self.db.append_event(run_id, "tool_parse_error", payload, step=step)
-            self.tracer.log_trace(run_id, "tool_parse_error", payload, step=step)
+            inserted = self.db.append_event(
+                run_id,
+                "tool_parse_error",
+                payload,
+                step=step,
+                idempotency_key=_event_key(
+                    run_id,
+                    f"tool_parse_error:{index}",
+                    step,
+                    payload,
+                ),
+            )
+            if inserted is not None:
+                self.tracer.log_trace(run_id, "tool_parse_error", payload, step=step)
 
         return ValidatedAgentResponse(
             assistant_text=parsed_response.assistant_text,
             tool_calls=parsed_response.tool_calls,
             parse_errors=parsed_response.parse_errors,
+            partial_turn=parsed_response.partial_turn,
+            expected_tool_call_count=parsed_response.expected_tool_call_count,
             raw_response=response,
-            message_count=len(context),
+            message_count=message_count,
             token_count=token_count,
         )
 
@@ -223,3 +296,8 @@ def _retry_payload(retry: Any) -> dict[str, Any]:
         if hasattr(retry, key)
     }
     return payload or {"retry": str(retry)}
+
+
+def _event_key(run_id: str, event_type: str, step: int, payload: dict[str, Any]) -> str:
+    digest = hashlib.sha256(stable_json(payload).encode("utf-8")).hexdigest()
+    return f"{run_id}:{event_type}:{step}:{digest}"
