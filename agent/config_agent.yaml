@@ -3,6 +3,7 @@ trace_dir: runs/traces
 workspace_root: workspace
 server_url: http://localhost:8000/chat
 token_budget: 8000
+cost_budget_tokens: 50000
 max_steps: 30
 max_retries: 4
 retry_base_delay: 0.25
