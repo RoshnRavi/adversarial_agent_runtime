@@ -300,6 +300,9 @@ class ToolExecutor:
                 idempotency_key=idempotency_key,
             )
 
+        if call.name == "send_email":
+            return self._execute_send_email_once(call, idempotency_key)
+
         try:
             result = self._execute_once(call, idempotency_key)
             self.db.record_tool_execution(
@@ -345,3 +348,61 @@ class ToolExecutor:
         if definition is None:
             raise ToolArgumentError(f"Unknown tool: {call.name}")
         return definition.handler(self, args, idempotency_key)
+
+    def _execute_send_email_once(self, call: ToolCall, idempotency_key: str) -> ToolResult:
+        args = call.arguments
+        if not isinstance(args, dict):
+            error = "ToolArgumentError: tool arguments must be an object"
+            self.db.record_tool_execution(
+                idempotency_key=idempotency_key,
+                run_id=self.run_id,
+                tool_call_id=call.id,
+                tool_name=call.name,
+                arguments={},
+                error=error,
+                status="failed",
+            )
+            return ToolResult(
+                tool_call_id=call.id,
+                tool_name=call.name,
+                ok=False,
+                error=error,
+                idempotency_key=idempotency_key,
+            )
+        to = args.get("to")
+        subject = args.get("subject")
+        body = args.get("body")
+        if not all(isinstance(value, str) for value in (to, subject, body)):
+            error = "ToolArgumentError: to, subject, and body must be strings"
+            self.db.record_tool_execution(
+                idempotency_key=idempotency_key,
+                run_id=self.run_id,
+                tool_call_id=call.id,
+                tool_name=call.name,
+                arguments=args,
+                error=error,
+                status="failed",
+            )
+            return ToolResult(
+                tool_call_id=call.id,
+                tool_name=call.name,
+                ok=False,
+                error=error,
+                idempotency_key=idempotency_key,
+            )
+        result = self.db.send_email_tool_once(
+            idempotency_key=idempotency_key,
+            run_id=self.run_id,
+            tool_call_id=call.id,
+            arguments=args,
+            to=to,
+            subject=subject,
+            body=body,
+        )
+        return ToolResult(
+            tool_call_id=call.id,
+            tool_name=call.name,
+            ok=True,
+            result=result,
+            idempotency_key=idempotency_key,
+        )
