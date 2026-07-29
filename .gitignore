@@ -43,6 +43,9 @@ runs/**
 workspace/**
 !workspace/.gitkeep
 
+# Part B is intentionally not part of this Part A submission.
+agent_fw/
+
 # Local config and secrets
 .env
 .env.*

@@ -537,7 +537,7 @@ class AgentRuntime:
             )
             if result_inserted is not None:
                 self.tracer.log_trace(run_id, "tool_result", payload, step=step)
-                memory.add_tool_result(call.name, payload)
+                memory.add_tool_result(result.tool_name, payload)
         return results
 
     def _blocked_tool_result(

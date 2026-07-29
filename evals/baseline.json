@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "total": 15,
+  "passed": 13,
+  "expected_failures": 2,
+  "unexpected_failures": 0,
+  "pass_rate": 0.867
+}

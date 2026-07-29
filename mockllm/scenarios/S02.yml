@@ -1,0 +1,4 @@
+id: S02
+name: Malformed tool arguments
+description: "Malformed tool arguments: trailing commas, unescaped newlines, truncated JSON mid-object."
+messages: []

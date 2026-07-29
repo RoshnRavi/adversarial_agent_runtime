@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import re
 
-
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]+|[^\sA-Za-z0-9_]", re.ASCII)
 
 
@@ -26,4 +25,3 @@ def count_message_tokens(messages: list[dict[str, str]]) -> int:
         total += count_tokens(message.get("role", ""))
         total += count_tokens(message.get("content", ""))
     return total
-

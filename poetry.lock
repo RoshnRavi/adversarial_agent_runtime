@@ -1,0 +1,3 @@
+# Placeholder kept because the requested tree includes poetry.lock.
+# This scaffold uses standard pyproject/setuptools by default.
+# If the project switches to Poetry, run `poetry lock` to replace this file.

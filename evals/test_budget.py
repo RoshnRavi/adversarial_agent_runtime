@@ -1,0 +1,136 @@
+import pytest
+
+from agent.exceptions import ContextLimitExceededError
+from agent.message import MemoryManager
+from agent.run import AgentDatabase, TraceReader, TraceWriter
+from agent.runtime import AgentRuntime, RuntimeConfig
+
+
+class ScriptedLLM:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.last_retries = []
+
+    def call(self, payload):
+        if not self.responses:
+            return {"content": "done"}
+        return self.responses.pop(0)
+
+
+def test_memory_rejects_single_message_over_budget() -> None:
+    memory = MemoryManager(token_budget=5)
+
+    with pytest.raises(ContextLimitExceededError):
+        memory.add_user_message("word " * 100)
+
+
+def _runtime(tmp_path, responses, **config_overrides):
+    config = RuntimeConfig(
+        db_path=tmp_path / "agent.db",
+        trace_dir=tmp_path / "traces",
+        workspace_root=tmp_path / "workspace",
+        retry_base_delay=0.0,
+        **config_overrides,
+    )
+    db = AgentDatabase(config.db_path)
+    runtime = AgentRuntime(
+        db,
+        memory=MemoryManager(config.token_budget),
+        tracer=TraceWriter(config.trace_dir),
+        llm_client=ScriptedLLM(responses),
+        config=config,
+    )
+    return runtime, db, config
+
+
+def test_step_ceiling_terminates_with_legible_reason(tmp_path) -> None:
+    responses = [
+        {
+            "tool_call": {
+                "id": f"call-{index}",
+                "name": "run_python",
+                "arguments": {"code": f"print({index})"},
+            }
+        }
+        for index in range(3)
+    ]
+    runtime, db, config = _runtime(tmp_path, responses, max_steps=2, no_progress_limit=10)
+
+    state = runtime.run_task("step-limit-run", "keep calling tools")
+    traces = list(TraceReader(config.trace_dir).read("step-limit-run"))
+
+    assert state.termination_reason == "MaxStepsReachedError: step limit reached"
+    assert any(
+        event["event_type"] == "loop_control"
+        and event["payload"]["decision"] == "step_limit"
+        for event in traces
+    )
+    db.close()
+
+
+def test_s4_no_progress_terminates_in_bounded_time_with_trace(tmp_path) -> None:
+    repeated_call = {
+        "tool_call": {
+            "id": "id-can-change",
+            "name": "run_python",
+            "arguments": {"code": "print(1)"},
+        }
+    }
+    runtime, db, config = _runtime(
+        tmp_path,
+        [repeated_call, repeated_call, repeated_call],
+        max_steps=5,
+        no_progress_limit=2,
+    )
+
+    state = runtime.run_task("s4-trace-run", "detect infinite loop")
+    traces = list(TraceReader(config.trace_dir).read("s4-trace-run"))
+    tool_parse_events = [
+        event for event in traces if event["event_type"] == "tool_calls_parsed"
+    ]
+    progress_events = [
+        event
+        for event in traces
+        if event["event_type"] == "loop_control"
+        and event["payload"]["decision"] == "progress_check"
+    ]
+
+    assert state.step_count == 2
+    assert state.termination_reason == "NoProgressError: same tool call repeated without progress"
+    assert len(tool_parse_events) == 2
+    assert [event["payload"]["repeat_count"] for event in progress_events] == [1, 2]
+    assert traces[-1]["event_type"] == "run_finished"
+    assert "NoProgressError" in traces[-1]["payload"]["reason"]
+    db.close()
+
+
+def test_cumulative_cost_budget_terminates_gracefully(tmp_path) -> None:
+    runtime, db, config = _runtime(
+        tmp_path,
+        [{"content": "done"}],
+        cost_budget_tokens=1,
+    )
+
+    state = runtime.run_task("cost-budget-run", "small task")
+    traces = list(TraceReader(config.trace_dir).read("cost-budget-run"))
+
+    assert state.termination_reason == "BudgetExceededError: cost budget exceeded"
+    assert any(event["event_type"] == "budget_charged" for event in traces)
+    assert traces[-1]["payload"]["reason"] == "BudgetExceededError: cost budget exceeded"
+    db.close()
+
+
+def test_context_token_budget_terminates_gracefully(tmp_path) -> None:
+    runtime, db, config = _runtime(
+        tmp_path,
+        [{"content": "word " * 100}],
+        token_budget=5,
+    )
+
+    state = runtime.run_task("context-budget-run", "x")
+    traces = list(TraceReader(config.trace_dir).read("context-budget-run"))
+
+    assert "ContextLimitExceededError" in (state.termination_reason or "")
+    assert traces[-1]["event_type"] == "run_finished"
+    assert "ContextLimitExceededError" in traces[-1]["payload"]["reason"]
+    db.close()
