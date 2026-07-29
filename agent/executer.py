@@ -1,20 +1,20 @@
-"""Auditable tool implementations for the custom runtime."""
+"""Local tool execution for the custom runtime."""
 
 from __future__ import annotations
 
 import subprocess
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-from .config import DEFAULT_CONFIG, RuntimeConfig
-from .database import AgentDatabase
-from .dto import ToolCall, ToolResult
 from .exceptions import SecurityViolationError, ToolArgumentError
-
+from .response import ToolCall
+from .run import AgentDatabase
+from .runtime import DEFAULT_CONFIG, RuntimeConfig, ToolResult
 
 WORKSPACE_ROOT = DEFAULT_CONFIG.workspace_root.resolve()
 
@@ -60,7 +60,7 @@ def _limit_child(memory_mb: int) -> None:
         memory_bytes = memory_mb * 1024 * 1024
         resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
         resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
-    except Exception:
+    except Exception:  # noqa: BLE001 - resource limits are best-effort per platform.
         return
 
 
@@ -185,7 +185,7 @@ class ToolExecutor:
                 result=result,
                 idempotency_key=idempotency_key,
             )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - surface any tool failure as a tool result.
             error = f"{type(exc).__name__}: {exc}"
             self.db.record_tool_execution(
                 idempotency_key=idempotency_key,

@@ -1,21 +1,14 @@
-"""Command line interface for the custom agent runtime."""
+"""User-facing entrypoint for the custom agent runtime."""
 
 from __future__ import annotations
 
 import argparse
 import signal
 import sys
-import uuid
 
-from .config import DEFAULT_CONFIG, RuntimeConfig
-from .database import AgentDatabase
 from .exceptions import AgentError
-from .llm_client import LLMClient
-from .loop import AgentLoop
-from .memory import MemoryManager
-from .replay import replay_run
-from .trace import TraceWriter
-
+from .run import AgentDatabase, replay_run
+from .runtime import DEFAULT_CONFIG, AgentRuntime, RuntimeConfig
 
 db_instance: AgentDatabase | None = None
 
@@ -45,14 +38,8 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_loop(config: RuntimeConfig, db: AgentDatabase) -> AgentLoop:
-    return AgentLoop(
-        db,
-        memory=MemoryManager(config.token_budget),
-        tracer=TraceWriter(config.trace_dir),
-        llm_client=LLMClient(config),
-        config=config,
-    )
+def _build_runtime(config: RuntimeConfig, db: AgentDatabase) -> AgentRuntime:
+    return AgentRuntime(db, config=config)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -74,13 +61,12 @@ def main(argv: list[str] | None = None) -> int:
 
     db_instance = AgentDatabase(config.db_path)
     try:
-        loop = _build_loop(config, db_instance)
+        runtime = _build_runtime(config, db_instance)
         if args.command == "run":
-            run_id = str(uuid.uuid4())
-            print(f"run_id={run_id}")
-            state = loop.run_task(run_id, args.task)
+            state = runtime.start_task(args.task)
+            print(f"run_id={state.run_id}")
         elif args.command == "resume":
-            state = loop.resume(args.run_id)
+            state = runtime.resume(args.run_id)
         else:
             raise AssertionError(f"Unhandled command: {args.command}")
         print(
@@ -88,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             f"reason={state.termination_reason or ''}"
         )
         return 0
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - report unexpected failures at the CLI boundary.
         print(f"fatal: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     finally:

@@ -1,4 +1,4 @@
-"""Mock LLM HTTP client with retry, jitter, and circuit breaker support."""
+"""Mock LLM transport and per-turn response validation."""
 
 from __future__ import annotations
 
@@ -7,11 +7,17 @@ import random
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
-from typing import Any, Callable
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field, is_dataclass
+from typing import TYPE_CHECKING, Any, Protocol
 
-from .config import DEFAULT_CONFIG, RuntimeConfig
 from .exceptions import CircuitBreakerOpenError, NetworkFailureError
+from .response import ToolCall, parse_agent_response
+from .runtime import DEFAULT_CONFIG, RuntimeConfig
+
+if TYPE_CHECKING:
+    from .message import MemoryManager
+    from .run import AgentDatabase, TraceWriter
 
 
 @dataclass
@@ -89,7 +95,7 @@ class LLMClient:
                     body = response.read().decode("utf-8")
                 parsed = json.loads(body)
                 if not isinstance(parsed, dict):
-                    raise ValueError("mock server response must be an object")
+                    raise TypeError("mock server response must be an object")
                 self.breaker.record_success()
                 return parsed
             except urllib.error.HTTPError as exc:
@@ -100,7 +106,13 @@ class LLMClient:
                     raise NetworkFailureError(f"HTTP {exc.code}: {exc.reason}") from exc
                 delay = self._retry_delay(attempt, retry_after)
                 self._record_retry(attempt, f"HTTP {exc.code}", delay)
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
+            except (
+                urllib.error.URLError,
+                TimeoutError,
+                json.JSONDecodeError,
+                ValueError,
+                TypeError,
+            ) as exc:
                 last_error = exc
                 if attempt == self.config.max_retries - 1:
                     self.breaker.record_failure()
@@ -123,3 +135,91 @@ class LLMClient:
     def _record_retry(self, attempt: int, reason: str, delay: float) -> None:
         self.last_retries.append(RetryEvent(attempt=attempt + 1, reason=reason, delay_seconds=delay))
         self.sleeper(delay)
+
+
+class LLMCaller(Protocol):
+    last_retries: list[Any]
+
+    def call(self, payload: dict[str, Any]) -> dict[str, Any]:
+        ...
+
+
+@dataclass(frozen=True)
+class ValidatedAgentResponse:
+    assistant_text: str
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    parse_errors: list[str] = field(default_factory=list)
+    raw_response: dict[str, Any] = field(default_factory=dict)
+    message_count: int = 0
+    token_count: int = 0
+
+
+class AgentValidator:
+    """Builds a model turn, calls mockllm, and records parsed response details."""
+
+    def __init__(
+        self,
+        db: AgentDatabase,
+        tracer: TraceWriter,
+        llm_client: LLMCaller,
+    ) -> None:
+        self.db = db
+        self.tracer = tracer
+        self.llm_client = llm_client
+
+    def validate_turn(
+        self,
+        run_id: str,
+        *,
+        task: str,
+        step: int,
+        memory: MemoryManager,
+    ) -> ValidatedAgentResponse:
+        context = memory.get_compacted_context()
+        token_count = memory.estimated_tokens()
+        llm_request_payload = {"message_count": len(context), "tokens": token_count}
+        self.db.append_event(run_id, "llm_request", llm_request_payload, step=step)
+        self.tracer.log_trace(run_id, "llm_request", llm_request_payload, step=step)
+
+        response = self.llm_client.call({"messages": context, "task": task, "step": step})
+        for retry in getattr(self.llm_client, "last_retries", []):
+            self.tracer.log_trace(run_id, "retry", _retry_payload(retry), step=step)
+        self.db.append_event(run_id, "llm_response", response, step=step)
+        self.tracer.log_trace(run_id, "llm_response", response, step=step)
+
+        parsed_response = parse_agent_response(response, step)
+        if parsed_response.assistant_text:
+            memory.add_assistant_message(parsed_response.assistant_text)
+            self.db.append_event(
+                run_id,
+                "assistant_message",
+                {"content": parsed_response.assistant_text},
+                step=step,
+            )
+
+        for error in parsed_response.parse_errors:
+            payload = {"error": error}
+            self.db.append_event(run_id, "tool_parse_error", payload, step=step)
+            self.tracer.log_trace(run_id, "tool_parse_error", payload, step=step)
+
+        return ValidatedAgentResponse(
+            assistant_text=parsed_response.assistant_text,
+            tool_calls=parsed_response.tool_calls,
+            parse_errors=parsed_response.parse_errors,
+            raw_response=response,
+            message_count=len(context),
+            token_count=token_count,
+        )
+
+
+def _retry_payload(retry: Any) -> dict[str, Any]:
+    if is_dataclass(retry) and not isinstance(retry, type):
+        return asdict(retry)
+    if isinstance(retry, dict):
+        return retry
+    payload = {
+        key: getattr(retry, key)
+        for key in ("attempt", "reason", "delay_seconds")
+        if hasattr(retry, key)
+    }
+    return payload or {"retry": str(retry)}

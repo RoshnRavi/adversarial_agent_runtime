@@ -1,15 +1,19 @@
-"""SQLite persistence for run state, append-only events, and side effects."""
+"""Run persistence, JSONL traces, and replay support."""
 
 from __future__ import annotations
 
 import json
 import sqlite3
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .dto import Event, RunState, stable_json
+from .exceptions import ReplayError
+from .runtime import DEFAULT_CONFIG, Event, RunState, TraceEvent, stable_json
+
+TRACE_DIR = DEFAULT_CONFIG.trace_dir
 
 
 @dataclass(frozen=True)
@@ -161,7 +165,9 @@ class AgentDatabase:
             raise KeyError(f"Unknown run_id: {run_id}")
         next_status = status if status is not None else current.status
         next_step = step_count if step_count is not None else current.step_count
-        next_reason = termination_reason if termination_reason is not None else current.termination_reason
+        next_reason = (
+            termination_reason if termination_reason is not None else current.termination_reason
+        )
         pending = (
             stable_json(pending_tool_calls)
             if pending_tool_calls is not None
@@ -408,3 +414,66 @@ class AgentDatabase:
 
     def close(self) -> None:
         self.conn.close()
+
+
+class TraceWriter:
+    def __init__(self, directory: Path = TRACE_DIR) -> None:
+        self.directory = Path(directory)
+        self.directory.mkdir(parents=True, exist_ok=True)
+
+    def write(self, run_id: str, event: dict[str, Any]) -> None:
+        path = self.directory / f"{run_id}.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(stable_json(event) + "\n")
+
+    def log_trace(
+        self,
+        run_id: str,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+        *,
+        step: int | None = None,
+    ) -> None:
+        self.write(
+            run_id,
+            TraceEvent(
+                run_id=run_id,
+                event_type=event_type,
+                payload=payload or {},
+                step=step,
+            ).to_dict(),
+        )
+
+
+class TraceReader:
+    def __init__(self, directory: Path = TRACE_DIR) -> None:
+        self.directory = Path(directory)
+
+    def read(self, run_id: str) -> Iterator[dict[str, Any]]:
+        path = self.directory / f"{run_id}.jsonl"
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    yield json.loads(line)
+
+
+class Replayer:
+    def __init__(self, reader: TraceReader | None = None) -> None:
+        self.reader = reader or TraceReader()
+
+    def replay(self, run_id: str) -> list[str]:
+        try:
+            events = list(self.reader.read(run_id))
+        except FileNotFoundError as exc:
+            raise ReplayError(f"No trace found for run_id {run_id}") from exc
+
+        lines: list[str] = []
+        for event in events:
+            step = event.get("step")
+            prefix = f"step {step}: " if step is not None else ""
+            lines.append(f"{prefix}{event.get('event_type')} {event.get('payload', {})}")
+        return lines
+
+
+def replay_run(run_id: str) -> str:
+    return "\n".join(Replayer().replay(run_id))

@@ -1,14 +1,18 @@
-"""Memory window management and deterministic context budgeting."""
+"""Message window and context-building helpers for the runtime."""
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
 from mockllm.tokenizer import count_message_tokens, count_tokens
 
-from .dto import Event, ToolResult, stable_json
 from .exceptions import ContextLimitExceededError
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 @dataclass
@@ -57,14 +61,14 @@ class MemoryWindow:
 
 
 class MemoryManager:
-    """Higher-level conversation memory used by the agent loop."""
+    """Higher-level conversation memory used by the agent runtime."""
 
     def __init__(self, token_budget: int = 8000) -> None:
         self.window = MemoryWindow(token_budget=token_budget)
         self.preserved_facts: list[str] = []
 
     @classmethod
-    def from_events(cls, events: list[Event], token_budget: int = 8000) -> "MemoryManager":
+    def from_events(cls, events: list[Any], token_budget: int = 8000) -> MemoryManager:
         memory = cls(token_budget=token_budget)
         for event in events:
             if event.event_type == "run_started":
@@ -87,14 +91,19 @@ class MemoryManager:
         self.window.add("assistant", content)
 
     def add_tool_result(self, tool_name: str, result: Any) -> None:
-        rendered = stable_json({"tool": tool_name, "result": result})
+        rendered = _stable_json({"tool": tool_name, "result": result})
         self._preserve_fact(rendered)
         self.window.add("tool", rendered)
 
     def get_compacted_context(self) -> list[dict[str, str]]:
         if self.preserved_facts:
             fact_text = "Preserved durable facts: " + " | ".join(self.preserved_facts[-20:])
-            existing = [m for m in self.window.messages if m.role == "system" and m.content.startswith("Preserved durable facts:")]
+            existing = [
+                message
+                for message in self.window.messages
+                if message.role == "system"
+                and message.content.startswith("Preserved durable facts:")
+            ]
             if existing:
                 existing[0].content = fact_text
             else:
