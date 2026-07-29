@@ -1,0 +1,18 @@
+db_path: runs/agent_events.db
+trace_dir: runs/traces
+workspace_root: workspace
+server_url: http://localhost:8000/chat
+token_budget: 8000
+max_steps: 30
+max_retries: 4
+retry_base_delay: 0.25
+request_timeout_seconds: 5.0
+circuit_max_failures: 5
+circuit_cooldown_seconds: 60
+no_progress_limit: 3
+python_timeout_seconds: 5
+python_memory_mb: 64
+http_timeout_seconds: 10.0
+http_allow_hosts:
+  - localhost
+  - 127.0.0.1
