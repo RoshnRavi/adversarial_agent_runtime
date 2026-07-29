@@ -38,8 +38,8 @@ class EventDTO:
 class AgentDatabase:
     """Manages durable agent state and exactly-once side-effect records."""
 
-    def __init__(self, db_path: str | Path = "runs/agent_events.db") -> None:
-        self.db_path = Path(db_path)
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        self.db_path = Path(db_path or DEFAULT_CONFIG.db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row

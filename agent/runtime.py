@@ -10,7 +10,10 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import yaml
+
 from .exceptions import (
+    AgentConfigError,
     AgentError,
     ContextLimitExceededError,
     MaxStepsReachedError,
@@ -26,26 +29,143 @@ if TYPE_CHECKING:
     from .validate import AgentValidator, LLMClient
 
 
+CONFIG_PATH = Path(__file__).with_name("config_agent.yaml")
+_CONFIG_KEYS = {
+    "db_path",
+    "trace_dir",
+    "workspace_root",
+    "server_url",
+    "token_budget",
+    "max_steps",
+    "max_retries",
+    "retry_base_delay",
+    "request_timeout_seconds",
+    "circuit_max_failures",
+    "circuit_cooldown_seconds",
+    "no_progress_limit",
+    "python_timeout_seconds",
+    "python_memory_mb",
+    "http_timeout_seconds",
+    "http_allow_hosts",
+}
+_PATH_KEYS = {"db_path", "trace_dir", "workspace_root"}
+_INT_KEYS = {
+    "token_budget",
+    "max_steps",
+    "max_retries",
+    "circuit_max_failures",
+    "circuit_cooldown_seconds",
+    "no_progress_limit",
+    "python_timeout_seconds",
+    "python_memory_mb",
+}
+_FLOAT_KEYS = {"retry_base_delay", "request_timeout_seconds", "http_timeout_seconds"}
+
+
+def _read_config_mapping(path: Path) -> dict[str, Any]:
+    try:
+        loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise AgentConfigError(f"runtime config file not found: {path}") from exc
+    except yaml.YAMLError as exc:
+        raise AgentConfigError(f"runtime config file is invalid YAML: {path}: {exc}") from exc
+    if not isinstance(loaded, dict):
+        raise AgentConfigError(f"runtime config file must contain a mapping: {path}")
+    return loaded
+
+
+def _coerce_runtime_config_values(raw: dict[str, Any], *, source: Path | str) -> dict[str, Any]:
+    missing = sorted(_CONFIG_KEYS - set(raw))
+    if missing:
+        raise AgentConfigError(f"missing runtime config key(s) in {source}: {', '.join(missing)}")
+    unknown = sorted(set(raw) - _CONFIG_KEYS)
+    if unknown:
+        raise AgentConfigError(f"unknown runtime config key(s) in {source}: {', '.join(unknown)}")
+
+    values: dict[str, Any] = {}
+    for key in _PATH_KEYS:
+        value = raw[key]
+        if not isinstance(value, (str, Path)):
+            raise AgentConfigError(f"{key} must be a path string in {source}")
+        values[key] = Path(value)
+
+    server_url = raw["server_url"]
+    if not isinstance(server_url, str) or not server_url:
+        raise AgentConfigError(f"server_url must be a non-empty string in {source}")
+    values["server_url"] = server_url
+
+    for key in _INT_KEYS:
+        value = raw[key]
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise AgentConfigError(f"{key} must be an integer in {source}")
+        values[key] = value
+
+    for key in _FLOAT_KEYS:
+        value = raw[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise AgentConfigError(f"{key} must be a number in {source}")
+        values[key] = float(value)
+
+    allow_hosts = raw["http_allow_hosts"]
+    if not isinstance(allow_hosts, (list, tuple)) or not allow_hosts:
+        raise AgentConfigError(f"http_allow_hosts must be a non-empty list in {source}")
+    if not all(isinstance(host, str) and host for host in allow_hosts):
+        raise AgentConfigError(f"http_allow_hosts entries must be non-empty strings in {source}")
+    values["http_allow_hosts"] = tuple(allow_hosts)
+    return values
+
+
+_CONFIG_DEFAULT_VALUES = _coerce_runtime_config_values(
+    _read_config_mapping(CONFIG_PATH),
+    source=CONFIG_PATH,
+)
+
+
 @dataclass(frozen=True)
 class RuntimeConfig:
-    db_path: Path = Path("runs/agent_events.db")
-    trace_dir: Path = Path("runs/traces")
-    workspace_root: Path = Path("workspace")
-    server_url: str = "http://localhost:8000/chat"
-    token_budget: int = 8000
-    max_steps: int = 30
-    max_retries: int = 4
-    retry_base_delay: float = 0.25
-    request_timeout_seconds: float = 5.0
-    circuit_max_failures: int = 5
-    circuit_cooldown_seconds: int = 60
-    no_progress_limit: int = 3
-    python_timeout_seconds: int = 5
-    python_memory_mb: int = 64
-    http_allow_hosts: tuple[str, ...] = field(default_factory=lambda: ("localhost", "127.0.0.1"))
+    db_path: Path = _CONFIG_DEFAULT_VALUES["db_path"]
+    trace_dir: Path = _CONFIG_DEFAULT_VALUES["trace_dir"]
+    workspace_root: Path = _CONFIG_DEFAULT_VALUES["workspace_root"]
+    server_url: str = _CONFIG_DEFAULT_VALUES["server_url"]
+    token_budget: int = _CONFIG_DEFAULT_VALUES["token_budget"]
+    max_steps: int = _CONFIG_DEFAULT_VALUES["max_steps"]
+    max_retries: int = _CONFIG_DEFAULT_VALUES["max_retries"]
+    retry_base_delay: float = _CONFIG_DEFAULT_VALUES["retry_base_delay"]
+    request_timeout_seconds: float = _CONFIG_DEFAULT_VALUES["request_timeout_seconds"]
+    circuit_max_failures: int = _CONFIG_DEFAULT_VALUES["circuit_max_failures"]
+    circuit_cooldown_seconds: int = _CONFIG_DEFAULT_VALUES["circuit_cooldown_seconds"]
+    no_progress_limit: int = _CONFIG_DEFAULT_VALUES["no_progress_limit"]
+    python_timeout_seconds: int = _CONFIG_DEFAULT_VALUES["python_timeout_seconds"]
+    python_memory_mb: int = _CONFIG_DEFAULT_VALUES["python_memory_mb"]
+    http_timeout_seconds: float = _CONFIG_DEFAULT_VALUES["http_timeout_seconds"]
+    http_allow_hosts: tuple[str, ...] = _CONFIG_DEFAULT_VALUES["http_allow_hosts"]
+
+    def __post_init__(self) -> None:
+        values = _coerce_runtime_config_values(
+            {key: getattr(self, key) for key in _CONFIG_KEYS},
+            source="RuntimeConfig",
+        )
+        for key, value in values.items():
+            object.__setattr__(self, key, value)
 
 
-DEFAULT_CONFIG = RuntimeConfig()
+def load_runtime_config(path: Path | None = None, **overrides: Any) -> RuntimeConfig:
+    config_path = path or CONFIG_PATH
+    raw = _read_config_mapping(config_path)
+    clean_overrides = {key: value for key, value in overrides.items() if value is not None}
+    unknown_overrides = sorted(set(clean_overrides) - _CONFIG_KEYS)
+    if unknown_overrides:
+        raise AgentConfigError(
+            f"unknown runtime config override(s): {', '.join(unknown_overrides)}"
+        )
+    values = _coerce_runtime_config_values(
+        {**raw, **clean_overrides},
+        source=config_path,
+    )
+    return RuntimeConfig(**values)
+
+
+DEFAULT_CONFIG = load_runtime_config()
 
 
 def stable_json(value: Any) -> str:

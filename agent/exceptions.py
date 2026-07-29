@@ -9,6 +9,10 @@ class AgentBaseError(AgentError):
     """Compatibility alias used by older loop code."""
 
 
+class AgentConfigError(AgentError):
+    """Raised when runtime configuration cannot be loaded or validated."""
+
+
 class NetworkFailureError(AgentError):
     """Raised when the mock LLM server cannot be reached or returns bad data."""
 

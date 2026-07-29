@@ -15,6 +15,12 @@ def _stable_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
+def _default_token_budget() -> int:
+    from .runtime import DEFAULT_CONFIG
+
+    return DEFAULT_CONFIG.token_budget
+
+
 @dataclass
 class MemoryMessage:
     role: str
@@ -26,7 +32,7 @@ class MemoryMessage:
 
 @dataclass
 class MemoryWindow:
-    token_budget: int = 8000
+    token_budget: int = field(default_factory=_default_token_budget)
     messages: list[MemoryMessage] = field(default_factory=list)
 
     def add(self, role: str, content: str) -> None:
@@ -63,12 +69,14 @@ class MemoryWindow:
 class MemoryManager:
     """Higher-level conversation memory used by the agent runtime."""
 
-    def __init__(self, token_budget: int = 8000) -> None:
-        self.window = MemoryWindow(token_budget=token_budget)
+    def __init__(self, token_budget: int | None = None) -> None:
+        self.window = MemoryWindow(
+            token_budget=_default_token_budget() if token_budget is None else token_budget
+        )
         self.preserved_facts: list[str] = []
 
     @classmethod
-    def from_events(cls, events: list[Any], token_budget: int = 8000) -> MemoryManager:
+    def from_events(cls, events: list[Any], token_budget: int | None = None) -> MemoryManager:
         memory = cls(token_budget=token_budget)
         for event in events:
             if event.event_type == "run_started":

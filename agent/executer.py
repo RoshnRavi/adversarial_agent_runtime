@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -23,24 +23,47 @@ class ToolError(SecurityViolationError):
     """Raised when a tool request violates runtime policy."""
 
 
-def _confined_path(path: str | Path, *, workspace_root: Path = WORKSPACE_ROOT) -> Path:
+@dataclass(frozen=True)
+class ToolDefinition:
+    name: str
+    description: str
+    arguments: dict[str, str]
+    handler: Callable[[ToolExecutor, dict[str, Any], str], Any] = field(
+        repr=False,
+        compare=False,
+    )
+
+    def to_public_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "description": self.description,
+            "arguments": dict(self.arguments),
+        }
+
+
+def _confined_path(path: str | Path, *, workspace_root: str | Path | None = None) -> Path:
     if not isinstance(path, (str, Path)):
         raise ToolArgumentError("path must be a string")
-    root = workspace_root.resolve()
+    root = Path(workspace_root or WORKSPACE_ROOT).resolve()
     candidate = (root / path).resolve()
     if not candidate.is_relative_to(root):
         raise ToolError(f"Path escapes workspace: {path}")
     return candidate
 
 
-def read_file(path: str | Path) -> str:
-    return _confined_path(path).read_text(encoding="utf-8")
+def read_file(path: str | Path, *, workspace_root: str | Path | None = None) -> str:
+    return _confined_path(path, workspace_root=workspace_root).read_text(encoding="utf-8")
 
 
-def write_file(path: str | Path, content: str) -> str:
+def write_file(
+    path: str | Path,
+    content: str,
+    *,
+    workspace_root: str | Path | None = None,
+) -> str:
     if not isinstance(content, str):
         raise ToolArgumentError("content must be a string")
-    target = _confined_path(path)
+    target = _confined_path(path, workspace_root=workspace_root)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return f"wrote {path}"
@@ -69,10 +92,12 @@ def run_python(
     *,
     timeout_seconds: int = DEFAULT_CONFIG.python_timeout_seconds,
     memory_mb: int = DEFAULT_CONFIG.python_memory_mb,
+    workspace_root: str | Path | None = None,
 ) -> PythonResult:
     if not isinstance(code, str):
         raise ToolArgumentError("code must be a string")
-    WORKSPACE_ROOT.mkdir(parents=True, exist_ok=True)
+    root = Path(workspace_root or WORKSPACE_ROOT).resolve()
+    root.mkdir(parents=True, exist_ok=True)
     network_block = """
 import socket
 def _blocked_socket(*args, **kwargs):
@@ -83,7 +108,7 @@ socket.create_connection = _blocked_socket
     try:
         completed = subprocess.run(
             [sys.executable, "-I", "-c", network_block + "\n" + code],
-            cwd=WORKSPACE_ROOT,
+            cwd=root,
             text=True,
             capture_output=True,
             timeout=timeout_seconds,
@@ -103,13 +128,23 @@ socket.create_connection = _blocked_socket
         )
 
 
-def http_get(url: str, *, allow_hosts: Iterable[str] = DEFAULT_CONFIG.http_allow_hosts) -> str:
+def http_get(
+    url: str,
+    *,
+    allow_hosts: Iterable[str] = DEFAULT_CONFIG.http_allow_hosts,
+    timeout_seconds: float = DEFAULT_CONFIG.http_timeout_seconds,
+) -> str:
     if not isinstance(url, str):
         raise ToolArgumentError("url must be a string")
-    host = urlparse(url).hostname
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ToolError(f"Unsupported URL scheme: {parsed.scheme or '<missing>'}")
+    host = parsed.hostname
+    if not host:
+        raise ToolError("URL must include a host")
     if host not in set(allow_hosts):
         raise ToolError(f"Host is not allow-listed: {host}")
-    with urlopen(url, timeout=10) as response:
+    with urlopen(url, timeout=timeout_seconds) as response:
         charset = response.headers.get_content_charset() or "utf-8"
         return response.read().decode(charset)
 
@@ -139,6 +174,104 @@ def send_email(
     finally:
         if owned_db:
             database.close()
+
+
+def _execute_read_file(executor: ToolExecutor, args: dict[str, Any], idempotency_key: str) -> str:
+    return read_file(args.get("path"), workspace_root=executor.config.workspace_root)
+
+
+def _execute_write_file(executor: ToolExecutor, args: dict[str, Any], idempotency_key: str) -> str:
+    return write_file(
+        args.get("path"),
+        args.get("content"),
+        workspace_root=executor.config.workspace_root,
+    )
+
+
+def _execute_run_python(
+    executor: ToolExecutor,
+    args: dict[str, Any],
+    idempotency_key: str,
+) -> dict[str, Any]:
+    result = run_python(
+        args.get("code"),
+        timeout_seconds=executor.config.python_timeout_seconds,
+        memory_mb=executor.config.python_memory_mb,
+        workspace_root=executor.config.workspace_root,
+    )
+    return {
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "returncode": result.returncode,
+    }
+
+
+def _execute_http_get(executor: ToolExecutor, args: dict[str, Any], idempotency_key: str) -> str:
+    return http_get(
+        args.get("url"),
+        allow_hosts=executor.config.http_allow_hosts,
+        timeout_seconds=executor.config.http_timeout_seconds,
+    )
+
+
+def _execute_send_email(
+    executor: ToolExecutor,
+    args: dict[str, Any],
+    idempotency_key: str,
+) -> dict[str, Any]:
+    return send_email(
+        args.get("to"),
+        args.get("subject"),
+        args.get("body"),
+        db=executor.db,
+        run_id=executor.run_id,
+        idempotency_key=idempotency_key,
+    )
+
+
+TOOL_REGISTRY: dict[str, ToolDefinition] = {
+    "read_file": ToolDefinition(
+        name="read_file",
+        description="Read a UTF-8 text file confined to the configured workspace.",
+        arguments={"path": "Workspace-relative file path to read."},
+        handler=_execute_read_file,
+    ),
+    "write_file": ToolDefinition(
+        name="write_file",
+        description="Write UTF-8 text to a file confined to the configured workspace.",
+        arguments={
+            "path": "Workspace-relative file path to write.",
+            "content": "Text content to write.",
+        },
+        handler=_execute_write_file,
+    ),
+    "run_python": ToolDefinition(
+        name="run_python",
+        description="Run Python code in a bounded subprocess with no network access.",
+        arguments={"code": "Python source code to execute."},
+        handler=_execute_run_python,
+    ),
+    "http_get": ToolDefinition(
+        name="http_get",
+        description="Fetch an HTTP(S) URL if its host is explicitly allow-listed.",
+        arguments={"url": "HTTP or HTTPS URL to fetch."},
+        handler=_execute_http_get,
+    ),
+    "send_email": ToolDefinition(
+        name="send_email",
+        description="Simulate an irreversible email send with SQLite idempotency.",
+        arguments={
+            "to": "Recipient email address.",
+            "subject": "Email subject.",
+            "body": "Email body.",
+        },
+        handler=_execute_send_email,
+    ),
+}
+
+
+def list_tools() -> list[dict[str, Any]]:
+    return [definition.to_public_dict() for definition in TOOL_REGISTRY.values()]
 
 
 class ToolExecutor:
@@ -208,31 +341,7 @@ class ToolExecutor:
         args = call.arguments
         if not isinstance(args, dict):
             raise ToolArgumentError("tool arguments must be an object")
-
-        if call.name == "read_file":
-            return read_file(args.get("path"))
-        if call.name == "write_file":
-            return write_file(args.get("path"), args.get("content"))
-        if call.name == "run_python":
-            result = run_python(
-                args.get("code"),
-                timeout_seconds=self.config.python_timeout_seconds,
-                memory_mb=self.config.python_memory_mb,
-            )
-            return {
-                "stdout": result.stdout,
-                "stderr": result.stderr,
-                "returncode": result.returncode,
-            }
-        if call.name == "http_get":
-            return http_get(args.get("url"), allow_hosts=self.config.http_allow_hosts)
-        if call.name == "send_email":
-            return send_email(
-                args.get("to"),
-                args.get("subject"),
-                args.get("body"),
-                db=self.db,
-                run_id=self.run_id,
-                idempotency_key=idempotency_key,
-            )
-        raise ToolArgumentError(f"Unknown tool: {call.name}")
+        definition = TOOL_REGISTRY.get(call.name)
+        if definition is None:
+            raise ToolArgumentError(f"Unknown tool: {call.name}")
+        return definition.handler(self, args, idempotency_key)

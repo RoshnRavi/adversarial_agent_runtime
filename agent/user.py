@@ -8,7 +8,7 @@ import sys
 
 from .exceptions import AgentError
 from .run import AgentDatabase, replay_run
-from .runtime import DEFAULT_CONFIG, AgentRuntime, RuntimeConfig
+from .runtime import DEFAULT_CONFIG, AgentRuntime, RuntimeConfig, load_runtime_config
 
 db_instance: AgentDatabase | None = None
 
@@ -23,8 +23,16 @@ def handle_graceful_shutdown(sig: int, frame: object) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Adversarial agent runtime")
-    parser.add_argument("--db", default=str(DEFAULT_CONFIG.db_path), help="SQLite database path")
-    parser.add_argument("--server-url", default=DEFAULT_CONFIG.server_url, help="Mock LLM URL")
+    parser.add_argument(
+        "--db",
+        default=None,
+        help=f"SQLite database path. Default: {DEFAULT_CONFIG.db_path}",
+    )
+    parser.add_argument(
+        "--server-url",
+        default=None,
+        help=f"Mock LLM URL. Default: {DEFAULT_CONFIG.server_url}",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Start a new task")
@@ -49,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, handle_graceful_shutdown)
 
     args = build_parser().parse_args(argv)
-    config = RuntimeConfig(db_path=args.db, server_url=args.server_url)
+    config = load_runtime_config(db_path=args.db, server_url=args.server_url)
 
     if args.command == "replay":
         try:
