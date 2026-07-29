@@ -29,6 +29,18 @@ class ContextLimitExceededError(AgentError):
     """Raised when the 8,000-token context ceiling cannot be preserved."""
 
 
+class BudgetExceededError(AgentError):
+    """Raised when the simulated cumulative run budget is exhausted."""
+
+
+class ModelContradictionError(AgentError):
+    """Raised when the assistant claims success for a failed tool operation."""
+
+
+class PartialToolTurnError(AgentError):
+    """Raised when the model emits an incomplete interrupted tool-call turn."""
+
+
 class MemoryLimitError(ContextLimitExceededError):
     """Compatibility alias for context budget failures."""
 
