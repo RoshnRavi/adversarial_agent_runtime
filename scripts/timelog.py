@@ -30,6 +30,8 @@ def rounded_elapsed_hours(elapsed_seconds: float) -> float:
     if elapsed_seconds < 0:
         raise ValueError("elapsed_seconds must be non-negative")
     raw_hours = elapsed_seconds / 3600
+    # The assessment asks for an honest work log; very quick commands still get
+    # a visible minimum entry instead of disappearing into 0h.
     return max(0.05, math.ceil(raw_hours / 0.05) * 0.05)
 
 
@@ -50,6 +52,7 @@ def record_entry(
         parsed = _parse_row(line)
         if parsed is None or parsed["date"] != day:
             continue
+        # Keep one Markdown row per day and append notes in command order.
         next_duration = float(parsed["duration"]) + duration_hours
         next_notes = _append_note(parsed["notes"], clean_note)
         lines[index] = _format_row(day, next_duration, next_notes)
@@ -72,6 +75,8 @@ def run_and_record(
 
     started = time.perf_counter()
     try:
+        # Failed verification commands are logged too; they are part of the
+        # assessment work and useful context for the final submission.
         completed = subprocess.run(command, check=False)
         return_code = completed.returncode
         status = "passed" if return_code == 0 else f"failed exit {return_code}"
@@ -118,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command_name == "run":
+        # argparse.REMAINDER includes a leading `--` separator when present.
         command = args.command[1:] if args.command[:1] == ["--"] else args.command
         if not command:
             parser.error("run requires a command after --")
@@ -143,6 +149,8 @@ def _write_timelog(path: Path, lines: list[str]) -> None:
 
 
 def _parse_row(line: str) -> dict[str, str] | None:
+    # Only rows matching the README-style Markdown table are merged; other text
+    # in TIMELOG.md is preserved as-is.
     match = ROW_PATTERN.match(line)
     if match is None:
         return None
@@ -168,6 +176,7 @@ def _append_note(existing: str, note: str) -> str:
 
 
 def _clean_note(note: str) -> str:
+    # Escape table pipes and collapse whitespace so notes cannot break columns.
     return " ".join(note.replace("|", "\\|").split())
 
 

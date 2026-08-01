@@ -36,9 +36,13 @@ class ScenarioState:
     def __init__(self, scenario: str) -> None:
         self.scenario = _normalise_scenario(scenario)
         self.retry_counts: dict[tuple[str, str, int], int] = {}
+        # ThreadingHTTPServer may handle concurrent requests; S06 retry counters
+        # must advance atomically per scenario/task/step.
         self.lock = threading.Lock()
 
     def response_for(self, payload: dict[str, Any], *, scenario: str | None = None) -> MockResponse:
+        # A query parameter can override the default scenario, which is useful
+        # for tests that share a server instance.
         scenario_id = _normalise_scenario(scenario or self.scenario)
         step = _step(payload)
         if scenario_id == "S01":
@@ -68,6 +72,8 @@ class ScenarioState:
         return MockResponse(payload={"content": f"unsupported scenario {scenario_id}"})
 
     def _s06(self, payload: dict[str, Any], step: int, scenario: str) -> MockResponse:
+        # Retry state is keyed by task and step so repeated runs do not consume
+        # each other's 429 -> 529 -> 200 sequence.
         key = (scenario, str(payload.get("task", "")), step)
         with self.lock:
             count = self.retry_counts.get(key, 0)
@@ -104,11 +110,15 @@ class MockLLMHandler(BaseHTTPRequestHandler):
             return
 
         try:
+            # The runtime always posts Messages-API-shaped JSON objects. Bad
+            # request shapes are surfaced as JSON errors rather than exceptions.
             payload = self._read_json_body()
         except (TypeError, ValueError) as exc:
             self._send_json(MockResponse(status=400, payload={"error": str(exc)}))
             return
 
+        # All scenario behavior funnels through ScenarioState, then either emits
+        # valid JSON or deliberately drops the connection mid-body for S05.
         scenario = _scenario_from_query(parsed.query)
         response = self.server.state.response_for(payload, scenario=scenario)
         if response.partial_body is not None:
@@ -144,6 +154,8 @@ class MockLLMHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _send_partial(self, response: MockResponse) -> None:
+        # S05 simulates a model/API connection reset after headers and a random
+        # prefix of the body have already been sent.
         self.send_response(response.status)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -155,6 +167,8 @@ class MockLLMHandler(BaseHTTPRequestHandler):
 
 
 def build_server(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, *, scenario: str = "S01") -> MockLLMServer:
+    # This is a local compatibility shim for the documented scenarios; official
+    # assessment parity should still be checked against the supplied server.
     server = MockLLMServer((host, port), MockLLMHandler)
     server.state = ScenarioState(scenario)
     return server
@@ -180,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _s01(step: int) -> MockResponse:
+    # S01: happy path, one write tool call, then final text.
     if step == 1:
         return MockResponse(
             payload={
@@ -194,6 +209,7 @@ def _s01(step: int) -> MockResponse:
 
 
 def _s02(step: int) -> MockResponse:
+    # S02: malformed JSON arguments with a trailing comma.
     if step == 1:
         return MockResponse(
             payload={
@@ -208,6 +224,7 @@ def _s02(step: int) -> MockResponse:
 
 
 def _s03(step: int) -> MockResponse:
+    # S03: one unknown tool and one known tool with wrong-typed arguments.
     if step == 1:
         return MockResponse(
             payload={
@@ -225,6 +242,7 @@ def _s03(step: int) -> MockResponse:
 
 
 def _s04() -> MockResponse:
+    # S04: same logical tool forever; the runtime must stop via no-progress.
     return MockResponse(
         payload={
             "tool_call": {
@@ -237,10 +255,12 @@ def _s04() -> MockResponse:
 
 
 def _s05() -> MockResponse:
+    # S05: interrupted response body.
     return MockResponse(partial_body=b'{"content": "this response is interrupted mid-stream"')
 
 
 def _s07(step: int) -> MockResponse:
+    # S07: prompt-injection text arrives through a file/tool result.
     if step == 1:
         return MockResponse(
             payload={
@@ -285,10 +305,12 @@ def _s07(step: int) -> MockResponse:
 
 
 def _s08() -> MockResponse:
+    # S08: oversized assistant content intended to exceed context budget.
     return MockResponse(payload={"content": "word " * 10000})
 
 
 def _s09(step: int) -> MockResponse:
+    # S09: duplicate tool_use IDs and duplicate logical email payload.
     if step == 1:
         email = {
             "id": "dup",
@@ -300,6 +322,7 @@ def _s09(step: int) -> MockResponse:
 
 
 def _s10(step: int) -> MockResponse:
+    # S10: parallel batch where one tool hangs and one fails.
     if step == 1:
         return MockResponse(
             payload={
@@ -321,6 +344,7 @@ def _s10(step: int) -> MockResponse:
 
 
 def _s11(step: int) -> MockResponse:
+    # S11: final assistant text falsely claims a failed tool succeeded.
     if step == 1:
         return MockResponse(
             payload={
@@ -335,6 +359,7 @@ def _s11(step: int) -> MockResponse:
 
 
 def _s12(step: int) -> MockResponse:
+    # S12: partial interrupted tool-call turn; incomplete calls must not run.
     if step == 1:
         return MockResponse(
             payload={

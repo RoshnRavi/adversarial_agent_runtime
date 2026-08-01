@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# Allow `python3 harness/chaos.py ...` from a checkout without requiring an
+# editable install first.
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
@@ -45,6 +47,8 @@ def build_agent_command(
 
 
 def run_chaos(command: list[str], *, attempts: int, min_delay: float, max_delay: float) -> int:
+    # Generic mode only checks whether an arbitrary command tolerates repeated
+    # interruption; it does not know how to resume agent state.
     failures = 0
     for _ in range(attempts):
         process = subprocess.Popen(command)
@@ -73,6 +77,8 @@ def run_agent_chaos(
 ) -> int:
     failures = 0
     for attempt in range(attempts):
+        # The first surviving process creates the run. Later attempts resume the
+        # same run so pending tool calls and idempotency records are exercised.
         resume = attempt > 0 and run_exists(db_path, run_id)
         command = build_agent_command(
             db_path=db_path,
@@ -88,6 +94,8 @@ def run_agent_chaos(
             process.wait()
         failures += process.returncode not in (0, _KILLED_RETURNCODE)
 
+    # A final uninterrupted resume lets the runtime reconcile any persisted
+    # in-flight state before assertions inspect durable side effects.
     final = subprocess.run(
         build_agent_command(
             db_path=db_path,
@@ -100,6 +108,8 @@ def run_agent_chaos(
     )
     failures += final.returncode != 0
     if expected_email_count is not None:
+        # Exactly-once email behavior is measured against the durable table, not
+        # process exit status or trace text.
         failures += int(not assert_sent_email_count(db_path, run_id, expected_email_count))
     return failures
 
@@ -140,6 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.run_id or args.task or args.db_path:
+        # Supplying any agent-specific option selects resume-aware chaos mode.
         if not args.run_id or not args.task or not args.db_path:
             raise SystemExit("--db, --run-id, and --task are required for agent chaos mode")
         return run_agent_chaos(

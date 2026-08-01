@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import re
 
+# Deterministic approximation: words/numbers/underscores are one token and
+# punctuation marks are individual tokens. This keeps budget tests stable.
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_]+|[^\sA-Za-z0-9_]", re.ASCII)
 
 
@@ -22,6 +24,8 @@ def count_message_tokens(messages: list[dict[str, str]]) -> int:
 
     total = 0
     for message in messages:
+        # The runtime budgets the complete message payload, so role labels count
+        # along with content.
         total += count_tokens(message.get("role", ""))
         total += count_tokens(message.get("content", ""))
     return total
