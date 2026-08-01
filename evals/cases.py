@@ -51,6 +51,8 @@ EVAL_CASES: list[EvalCase] = [
         "mixed batch skips side effect after sibling failure",
         adversarial=True,
     ),
+    # These are real executed checks that document known gaps; the runner reports
+    # them as expected failures instead of excluding them from the pass rate.
     EvalCase(
         "FAIL01",
         "run_python filesystem side effect rollback",

@@ -1,3 +1,5 @@
+"""Tests for assessment timelog recording and command wrapping."""
+
 from __future__ import annotations
 
 import sys

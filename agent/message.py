@@ -44,6 +44,8 @@ def _default_token_budget() -> int:
 
 
 def render_untrusted_tool_result(tool_name: str, result: Any) -> str:
+    # Tool output is wrapped as data with explicit sentinels before it ever
+    # returns to the model, so prompt-injection text is not rendered as a role.
     payload = {
         "tool": tool_name,
         "untrusted": True,
@@ -156,6 +158,8 @@ class MemoryWindow:
         if _message_token_count(source) <= self.token_budget:
             return source
 
+        # Compaction keeps the safety preamble, durable fact ledger, first user
+        # request, and recent tail; older removable messages become a summary.
         first_user_index = self._first_user_index(source)
         recent_start = max(0, len(source) - RECENT_MESSAGE_COUNT)
         keep_indices: set[int] = set(range(recent_start, len(source)))
@@ -210,6 +214,8 @@ class MemoryWindow:
         snippets: list[str] = []
         for message in messages[:SUMMARY_MESSAGE_LIMIT]:
             if message.role == "tool":
+                # Never copy tool-result payloads into summaries; that would
+                # weaken the untrusted-data boundary during compaction.
                 snippet = "[untrusted tool result omitted]"
             else:
                 snippet = _clip_text(message.content, SUMMARY_SNIPPET_CHARS)
@@ -276,6 +282,8 @@ class MemoryManager:
         last_error: ContextLimitExceededError | None = None
 
         while True:
+            # The fact ledger gets progressively trimmed if it competes with the
+            # hard token budget; protected safety text is kept until failure.
             self._sync_durable_facts_message(selected_facts)
             try:
                 self.window.compact_if_needed()
@@ -313,6 +321,8 @@ class MemoryManager:
         clipped = _clip_text(content, DURABLE_FACT_CHAR_LIMIT)
         if not clipped:
             return
+        # Early user turns get priority because the assessment includes a
+        # long-horizon recall task around facts stated near the beginning.
         early_user = role == "user" and turn_index <= 5
         marked_fact = _has_fact_marker(clipped)
         if not early_user and not marked_fact:
@@ -353,6 +363,8 @@ class MemoryManager:
         if not facts:
             return
         fact_message = self._fact_ledger_message(facts)
+        # Keep the ledger next to the safety preamble so compaction treats it as
+        # protected system context rather than an old droppable turn.
         insert_at = (
             1
             if self.window.messages and _is_safety_preamble(self.window.messages[0])

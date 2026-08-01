@@ -62,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "replay":
         try:
+            # Replay is intentionally available without constructing the runtime
+            # or opening a model connection.
             print(replay_run(args.run_id))
             return 0
         except AgentError as exc:

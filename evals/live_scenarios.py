@@ -70,6 +70,8 @@ def _check_scenario(
     db: AgentDatabase,
     config: RuntimeConfig,
 ) -> tuple[bool, str]:
+    # These checks are intentionally behavior-level smoke tests: they prove each
+    # documented local scenario terminates with the expected durable outcome.
     checks: dict[str, Callable[[], tuple[bool, str]]] = {
         "S01": lambda: _expect(
             state.status == "FINISHED"

@@ -1,3 +1,5 @@
+"""Tests that tool-result prompt injections cannot cross trust boundaries."""
+
 from __future__ import annotations
 
 from pathlib import Path

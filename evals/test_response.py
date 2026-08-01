@@ -1,3 +1,5 @@
+"""Tests for parsing mock model text, tool calls, and partial turns."""
+
 from agent.response import parse_agent_response
 
 

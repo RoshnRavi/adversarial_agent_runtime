@@ -280,6 +280,8 @@ class AgentRuntime:
             return state
 
         events = self.db.get_events(run_id)
+        # Resume reconstructs conversation memory from durable events, not from
+        # process-local objects that may have been lost during a kill/restart.
         if self.memory is not None:
             memory = self.memory
         elif created:
@@ -298,6 +300,8 @@ class AgentRuntime:
         while step < self.config.max_steps:
             try:
                 events = self.db.get_events(run_id)
+                # A terminal no-progress decision may have been recorded before a
+                # crash; check it before executing any recovered pending call.
                 self._raise_if_recorded_no_progress(events)
                 if not pending:
                     pending = self._recover_pending_tool_calls(run_id, events, step)
@@ -312,6 +316,8 @@ class AgentRuntime:
                         status = "RUNNING_TOOLS"
 
                 if pending:
+                    # Tool execution is separated from model calling so pending
+                    # calls can survive interruption and be replayed exactly once.
                     self._execute_tool_calls(run_id, pending, memory, step)
                     pending = []
                     self.db.update_run(
@@ -326,6 +332,9 @@ class AgentRuntime:
                 events = self.db.get_events(run_id)
                 recorded_response = self._recorded_response_to_process(events, step)
                 if recorded_response is not None:
+                    # If the model response was persisted but parsing/tool handling
+                    # was interrupted, process the recorded bytes instead of calling
+                    # the model again and changing the transcript.
                     request_payload = self._llm_request_payload(events, step)
                     validated_response = self.validator.validate_recorded_response(
                         run_id,
@@ -366,6 +375,8 @@ class AgentRuntime:
                 total_cost = self._charge_budget(run_id, validated_response, total_cost, step)
 
                 if self._is_incomplete_partial_turn(validated_response):
+                    # S12: partial tool-call turns are treated as corrupt input.
+                    # Executing the one visible call would silently lose siblings.
                     payload = {
                         "expected_tool_call_count": validated_response.expected_tool_call_count,
                         "parsed_tool_call_count": len(validated_response.tool_calls),
@@ -382,6 +393,8 @@ class AgentRuntime:
                     raise PartialToolTurnError("incomplete interrupted tool-call turn")
 
                 if not validated_response.tool_calls:
+                    # Final assistant text is only accepted after checking that it
+                    # does not contradict the latest failed tool batch.
                     contradiction = self._model_contradiction(
                         run_id,
                         validated_response.assistant_text,
@@ -466,6 +479,8 @@ class AgentRuntime:
         from .executer import ToolExecutor
         from .run import AgentDatabase
 
+        # Trace starts are step-scoped evidence. They intentionally do not share
+        # the execution idempotency key, so repeated S04 calls still leave a trace.
         for index, call in enumerate(calls):
             idempotency_key = self._idempotency_key(run_id, call)
             start_payload = {"tool_call": asdict(call)}
@@ -491,6 +506,8 @@ class AgentRuntime:
             idempotency_key = self._idempotency_key(run_id, call)
             existing = self.db.get_tool_execution(idempotency_key)
             if existing is not None:
+                # Execution idempotency is separate from event idempotency: a
+                # duplicate logical call emits per-step results but does not rerun.
                 existing_results[index] = self._tool_result_from_execution(call, existing)
             else:
                 calls_to_execute.append((index, call))
@@ -518,6 +535,8 @@ class AgentRuntime:
         for index, result in existing_results.items():
             ordered_results[index] = result
 
+        # Non-side-effect tools run first and may run concurrently. Side effects
+        # are delayed until sibling failures are known.
         non_side_effect_calls = [
             (index, call) for index, call in calls_to_execute if not self._is_side_effect_tool(call)
         ]
@@ -538,6 +557,8 @@ class AgentRuntime:
         ]:
             idempotency_key = self._idempotency_key(run_id, call)
             if self._batch_has_failed_result(ordered_results):
+                # A known-failing sibling blocks side effects instead of allowing
+                # mixed success/failure batches to partially mutate the workspace.
                 ordered_results[index] = self._skipped_side_effect_result(
                     run_id,
                     call,
@@ -550,12 +571,16 @@ class AgentRuntime:
             result_index, result = run_one(index, call)
             ordered_results[result_index] = result
             if result.ok and preimage is not None:
+                # Preimages allow reversible writes to be restored if a later
+                # side effect in the same batch fails before completion.
                 write_preimages.append((index, *preimage))
             elif not result.ok:
                 restored_write_indexes.update(
                     self._rollback_writes(write_preimages, ordered_results)
                 )
 
+        # Email is last because it is simulated but irreversible; once queued it
+        # cannot be rolled back if a later email fails.
         for index, call in [
             item for item in calls_to_execute if item[1].name == "send_email"
         ]:
@@ -641,6 +666,7 @@ class AgentRuntime:
 
     @staticmethod
     def _tool_result_from_execution(call: ToolCall, existing: dict[str, Any]) -> ToolResult:
+        """Adapt a durable execution row into this step's tool-result evidence."""
         return ToolResult(
             tool_call_id=call.id,
             tool_name=call.name,
@@ -666,6 +692,7 @@ class AgentRuntime:
         )
 
     def _capture_write_preimage(self, call: ToolCall) -> tuple[Path, bytes | None] | None:
+        """Capture the previous workspace file state for best-effort rollback."""
         path = call.arguments.get("path")
         if not isinstance(path, (str, Path)):
             return None
@@ -762,6 +789,8 @@ class AgentRuntime:
                 "no_progress_limit": self.config.no_progress_limit,
             },
         )
+        # The terminal repeat count is detected before executing the repeated
+        # pending call, which bounds S04 without another side effect attempt.
         if repeat_count >= self.config.no_progress_limit:
             raise NoProgressError("same tool call repeated without progress")
 
@@ -829,6 +858,8 @@ class AgentRuntime:
         failed_results = self._latest_failed_tool_results(run_id, step)
         if not failed_results:
             return None
+        # Concrete target matches catch obvious false claims, while the generic
+        # fallback catches "everything succeeded" after any failed latest batch.
         for failed in failed_results:
             targets = self._failed_tool_targets(failed)
             matched = [target for target in targets if target and target.lower() in text]

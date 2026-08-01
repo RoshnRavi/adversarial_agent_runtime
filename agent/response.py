@@ -45,6 +45,8 @@ def _parse_tool_calls(response: dict[str, Any], step: int) -> tuple[list[ToolCal
     raw_items: list[Any] = []
     errors: list[str] = []
 
+    # mockllm deliberately varies tool-call shape across scenarios; normalize all
+    # supported shapes before validating individual calls.
     if isinstance(response.get("tool_calls"), list):
         raw_items.extend(response["tool_calls"])
     if isinstance(response.get("tool_call"), dict):
@@ -78,10 +80,14 @@ def _parse_tool_calls(response: dict[str, Any], step: int) -> tuple[list[ToolCal
         try:
             args = _coerce_arguments(raw_args)
         except ToolArgumentError as exc:
+            # Keep a synthetic failed tool call so malformed arguments are visible
+            # to the model as tool evidence instead of disappearing.
             errors.append(str(exc))
             args = {"_malformed_arguments": str(raw_args), "_error": str(exc)}
         call_id = item.get("id")
         if not isinstance(call_id, str) or not call_id:
+            # Missing IDs are made deterministic so idempotency keys stay stable
+            # across replay of the same response.
             call_id = f"step-{step}-tool-{index}"
         calls.append(ToolCall(id=call_id, name=name, arguments=args, raw_arguments=raw_args))
     return calls, errors
@@ -96,6 +102,8 @@ def _coerce_arguments(raw_args: Any) -> dict[str, Any]:
         parsed = _try_parse_json(raw_args)
         if isinstance(parsed, dict):
             return parsed
+        # S02 includes common model JSON mistakes; repair only the narrow
+        # trailing-comma case and report everything else as malformed.
         repaired = re.sub(r",\s*([}\]])", r"\1", raw_args)
         parsed = _try_parse_json(repaired)
         if isinstance(parsed, dict):

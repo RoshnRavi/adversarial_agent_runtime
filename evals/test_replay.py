@@ -1,3 +1,5 @@
+"""Tests for JSONL trace replay without model or tool execution."""
+
 from pathlib import Path
 from typing import Any
 

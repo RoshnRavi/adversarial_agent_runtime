@@ -1,3 +1,5 @@
+"""End-to-end runtime tests using scripted model responses."""
+
 from pathlib import Path
 
 from agent.message import MemoryManager, MemoryWindow

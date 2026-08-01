@@ -105,6 +105,8 @@ class LLMClient:
                 if exc.code not in (429, 529) or attempt == self.config.max_retries - 1:
                     self.breaker.record_failure()
                     raise NetworkFailureError(f"HTTP {exc.code}: {exc.reason}") from exc
+                # The mock server uses 429/529 to exercise retry accounting; all
+                # retry details are exposed through last_retries for tracing.
                 delay = self._retry_delay(attempt, retry_after)
                 self._record_retry(attempt, f"HTTP {exc.code}", delay)
             except (
@@ -181,6 +183,8 @@ class AgentValidator:
         context = memory.get_compacted_context()
         token_count = memory.estimated_tokens()
         llm_request_payload = {"message_count": len(context), "tokens": token_count}
+        # Request metadata is persisted before the HTTP call so a crash at this
+        # boundary can retry the same step instead of skipping it.
         request_inserted = self.db.append_event(
             run_id,
             "llm_request",
@@ -194,6 +198,8 @@ class AgentValidator:
         response = self.llm_client.call({"messages": context, "task": task, "step": step})
         for retry in getattr(self.llm_client, "last_retries", []):
             self.tracer.log_trace(run_id, "retry", _retry_payload(retry), step=step)
+        # Raw response bytes are recorded before parsing; resume can process this
+        # durable response without contacting the model again.
         response_inserted = self.db.append_event(
             run_id,
             "llm_response",
@@ -257,6 +263,8 @@ class AgentValidator:
                 self.tracer.log_trace(run_id, "assistant_message", payload, step=step)
 
         for index, error in enumerate(parsed_response.parse_errors):
+            # Parse errors are returned as conversation evidence, letting the
+            # model recover from malformed tool JSON without crashing the agent.
             payload = {"error": error}
             inserted = self.db.append_event(
                 run_id,

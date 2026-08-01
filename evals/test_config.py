@@ -1,3 +1,5 @@
+"""Tests for runtime configuration loading, overrides, and validation."""
+
 from pathlib import Path
 from textwrap import dedent
 

@@ -1,3 +1,5 @@
+"""Regression tests for adversarial loop and tool-boundary behavior."""
+
 from pathlib import Path
 
 from agent.executer import ToolError, http_get, write_file

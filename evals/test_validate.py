@@ -1,3 +1,5 @@
+"""Tests for mock LLM transport validation and retry trace recording."""
+
 from pathlib import Path
 from typing import Any
 

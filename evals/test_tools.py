@@ -1,3 +1,5 @@
+"""Tests for local tool policies, registry exposure, and execution errors."""
+
 from __future__ import annotations
 
 from pathlib import Path

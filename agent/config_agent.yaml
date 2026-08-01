@@ -1,7 +1,12 @@
+# Durable state, traces, and confined file-tool workspace.
 db_path: runs/agent_events.db
 trace_dir: runs/traces
 workspace_root: workspace
+
+# Local mock model endpoint used by live runs.
 server_url: http://localhost:8000/chat
+
+# Runtime loop and deterministic token/cost ceilings.
 token_budget: 8000
 cost_budget_tokens: 50000
 max_steps: 50
@@ -11,6 +16,8 @@ request_timeout_seconds: 5.0
 circuit_max_failures: 5
 circuit_cooldown_seconds: 60
 no_progress_limit: 3
+
+# Tool-level policy limits.
 python_timeout_seconds: 5
 python_memory_mb: 64
 http_timeout_seconds: 10.0

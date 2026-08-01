@@ -46,6 +46,8 @@ def _confined_path(path: str | Path, *, workspace_root: str | Path | None = None
         raise ToolArgumentError("path must be a string")
     root = Path(workspace_root or WORKSPACE_ROOT).resolve()
     candidate = (root / path).resolve()
+    # File tools never receive raw host paths; every model-supplied path must
+    # resolve under the configured workspace root.
     if not candidate.is_relative_to(root):
         raise ToolError(f"Path escapes workspace: {path}")
     return candidate
@@ -81,6 +83,7 @@ def _limit_child(memory_mb: int) -> None:
         import resource
 
         memory_bytes = memory_mb * 1024 * 1024
+        # Resource limits are applied in the child process before user code runs.
         resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
         resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
     except Exception:  # noqa: BLE001 - resource limits are best-effort per platform.
@@ -98,6 +101,7 @@ def run_python(
         raise ToolArgumentError("code must be a string")
     root = Path(workspace_root or WORKSPACE_ROOT).resolve()
     root.mkdir(parents=True, exist_ok=True)
+    # This blocks ordinary Python socket use, but it is not an OS network sandbox.
     network_block = """
 import socket
 def _blocked_socket(*args, **kwargs):
@@ -145,6 +149,7 @@ def http_get(
     host = parsed.hostname
     if not host:
         raise ToolError("URL must include a host")
+    # Refusals are normal tool errors so the model can see why the fetch failed.
     if host not in set(allow_hosts):
         raise ToolError(f"Host is not allow-listed: {host}")
     with urlopen(url, timeout=timeout_seconds) as response:
@@ -163,6 +168,8 @@ def send_email(
 ) -> dict[str, Any]:
     if not all(isinstance(value, str) for value in (to, subject, body)):
         raise ToolArgumentError("to, subject, and body must be strings")
+    # Standalone calls still use an idempotency key because email is modeled as
+    # irreversible even though the implementation only writes SQLite rows.
     key = idempotency_key or f"manual:{run_id}:{to}:{subject}:{body}"
     owned_db = db is None
     database = db or AgentDatabase()
@@ -294,6 +301,8 @@ class ToolExecutor:
     def execute(self, call: ToolCall, idempotency_key: str) -> ToolResult:
         existing = self.db.get_tool_execution(idempotency_key)
         if existing is not None:
+            # Tool execution rows are the exactly-once guard. Event rows may be
+            # emitted again for trace evidence, but the tool body is not rerun.
             return ToolResult(
                 tool_call_id=call.id,
                 tool_name=call.name,
@@ -325,6 +334,8 @@ class ToolExecutor:
                 idempotency_key=idempotency_key,
             )
         except Exception as exc:  # noqa: BLE001 - surface any tool failure as a tool result.
+            # Tool errors stay inside the conversation as data instead of
+            # crashing the runtime loop.
             error = f"{type(exc).__name__}: {exc}"
             self.db.record_tool_execution(
                 idempotency_key=idempotency_key,
@@ -393,6 +404,8 @@ class ToolExecutor:
                 error=error,
                 idempotency_key=idempotency_key,
             )
+        # Validation happens before the irreversible SQLite insert so a malformed
+        # email never records a sent row.
         result = self.db.send_email_tool_once(
             idempotency_key=idempotency_key,
             run_id=self.run_id,

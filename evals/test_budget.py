@@ -1,3 +1,5 @@
+"""Tests for step, no-progress, token, and simulated cost budgets."""
+
 import pytest
 
 import agent.executer as executer_module

@@ -40,6 +40,8 @@ class EvalInputError(ValueError):
 
 
 class ScriptedLLM:
+    """Deterministic model double used for fast non-HTTP eval cases."""
+
     def __init__(self, responses: list[Any]) -> None:
         self.responses = list(responses)
         self.last_retries: list[Any] = []
@@ -184,6 +186,8 @@ def _optional_positive_int(
 
 
 def run_case(case: EvalCase, inputs: dict[str, EvalInput] | None = None) -> tuple[bool, str]:
+    # Integration cases use the real HTTP client against a local server; the
+    # rest use ScriptedLLM so failures stay deterministic and cheap.
     if case.id == "I01":
         return _run_local_mock_server_case()
     if case.id == "I02":
@@ -433,6 +437,8 @@ def main() -> int:
     results = []
     for case in EVAL_CASES:
         passed, detail = run_case(case, inputs)
+        # Expected failures are executed and reported, not skipped, so they still
+        # prove the known gap exists and remains documented.
         status = "PASS" if passed else ("EXPECTED_FAIL" if case.expected_failure else "FAIL")
         results.append({"id": case.id, "status": status, "detail": detail})
         print(f"{case.id} {status} - {case.name}" + (f" ({detail})" if detail else ""))

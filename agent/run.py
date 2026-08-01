@@ -51,6 +51,8 @@ class AgentDatabase:
 
     def _create_tables(self) -> None:
         with self.conn:
+            # `runs` is the finite-state checkpoint used by resume to decide
+            # whether to call the model, execute pending tools, or return.
             self.conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS runs (
@@ -65,6 +67,8 @@ class AgentDatabase:
                 )
                 """
             )
+            # `events` is append-only evidence. Idempotency keys prevent duplicate
+            # observations from being recorded during resume/retry.
             self.conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS events (
@@ -78,6 +82,8 @@ class AgentDatabase:
                 )
                 """
             )
+            # `tool_executions` dedupes actual tool bodies. It is intentionally
+            # separate from trace events, which may be step-scoped evidence.
             self.conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS tool_executions (
@@ -94,6 +100,8 @@ class AgentDatabase:
                 )
                 """
             )
+            # `sent_emails` is the irreversible side-effect table. Exactly-once
+            # email behavior is asserted against this table, not just traces.
             self.conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS sent_emails (
@@ -209,6 +217,8 @@ class AgentDatabase:
         step: int | None = None,
         idempotency_key: str | None = None,
     ) -> int | None:
+        # State and event insertion are committed together so resume never sees
+        # an advanced run state without the evidence that explains it.
         current = self.get_run(run_id)
         if current is None:
             raise KeyError(f"Unknown run_id: {run_id}")
@@ -287,6 +297,8 @@ class AgentDatabase:
 
     def _insert_event(self, event: Event) -> sqlite3.Cursor:
         verb = "INSERT OR IGNORE" if event.idempotency_key is not None else "INSERT"
+        # Event idempotency is "at most one matching observation"; events without
+        # a key are intentionally append-only.
         return self.conn.execute(
             f"""
             {verb} INTO events
@@ -397,6 +409,8 @@ class AgentDatabase:
     ) -> None:
         now = time.time()
         with self.conn:
+            # Tool rows are upserted so rollback/skip handling can correct the
+            # durable outcome for a logical execution key.
             self.conn.execute(
                 """
                 INSERT INTO tool_executions
@@ -478,6 +492,8 @@ class AgentDatabase:
     ) -> dict[str, Any]:
         now = time.time()
         with self.conn:
+            # Insert the email and matching tool execution in one transaction so
+            # a resume cannot observe only half of the irreversible send record.
             self.conn.execute(
                 """
                 INSERT OR IGNORE INTO sent_emails
@@ -543,6 +559,7 @@ class TraceWriter:
     def write(self, run_id: str, event: dict[str, Any]) -> None:
         path = self.directory / f"{run_id}.jsonl"
         with path.open("a", encoding="utf-8") as handle:
+            # Replay reads these JSONL records without touching SQLite or tools.
             handle.write(stable_json(event) + "\n")
 
     def log_trace(
@@ -593,6 +610,8 @@ class Replayer:
         self.reader = reader or TraceReader()
 
     def replay(self, run_id: str) -> list[str]:
+        # Replay is descriptive: it reconstructs recorded decisions, never calls
+        # the model, and never re-executes side effects.
         try:
             events = list(self.reader.read(run_id))
         except OSError as exc:

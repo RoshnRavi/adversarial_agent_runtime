@@ -1,3 +1,5 @@
+"""Tests for chaos-harness helpers and email-count assertions."""
+
 from pathlib import Path
 
 from agent.run import AgentDatabase

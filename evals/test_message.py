@@ -1,3 +1,5 @@
+"""Tests for memory compaction, fact preservation, and untrusted tool output."""
+
 import pytest
 
 from agent.exceptions import ContextLimitExceededError

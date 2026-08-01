@@ -1,3 +1,5 @@
+"""Tests for resume, idempotency, and exactly-once side-effect durability."""
+
 from pathlib import Path
 
 from agent.response import ToolCall
