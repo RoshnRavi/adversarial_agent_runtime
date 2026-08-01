@@ -255,16 +255,25 @@ def run_case(case: EvalCase, inputs: dict[str, EvalInput] | None = None) -> tupl
                 )
                 return passed, "" if passed else state.termination_reason or case.reason
 
-            if case.id == "FAIL01":
+            if case.id == "A13":
                 failed_tool_result = _has_failed_tool_result(db, eval_input.run_id)
                 passed = failed_tool_result and "ModelContradictionError" in (
                     state.termination_reason or ""
                 )
+                return passed, "" if passed else state.termination_reason or case.reason
+
+            if case.id == "A14":
+                side_effect_path = loop.config.workspace_root / "f02-side-effect.txt"
+                passed = not side_effect_path.exists()
+                return passed, "" if passed else case.reason
+
+            if case.id == "FAIL01":
+                side_effect_path = loop.config.workspace_root / "py-side-effect.txt"
+                passed = not side_effect_path.exists()
                 return passed, "" if passed else case.reason
 
             if case.id == "FAIL02":
-                side_effect_path = loop.config.workspace_root / "f02-side-effect.txt"
-                passed = not side_effect_path.exists()
+                passed = db.count_sent_emails(eval_input.run_id) == 0
                 return passed, "" if passed else case.reason
 
             return False, "case not implemented"

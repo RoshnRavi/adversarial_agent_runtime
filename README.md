@@ -9,7 +9,7 @@ implementation lives in `agent/`; Part B is intentionally excluded until it is r
 - Runtime defaults: `agent/config_agent.yaml`
 - Persistence and replay: SQLite plus JSONL traces in `agent/run.py`
 - Local tools: `read_file`, `write_file`, `run_python`, `http_get`, `send_email`
-- Evals: 16 named cases, currently 14 passing and 2 expected failures
+- Evals: 18 named cases, currently 16 passing and 2 expected failures
 - Live `run` commands require a mock LLM server already listening at the configured
   `server_url`, default `http://localhost:8000/chat`
 
@@ -87,6 +87,7 @@ the actual ID printed by `run`.
 make setup
 make test
 make eval
+make live-scenarios
 make mockllm SCENARIO=S01
 make run TASK="write a report"
 make timelog HOURS="0.25" NOTE="design review and write-up"
@@ -99,7 +100,7 @@ because they still count as assessment work.
 
 `make mockllm SCENARIO=S01` starts the local mock server at
 `http://127.0.0.1:8000/chat`. Use `S01` through `S12` for the documented scenario
-shapes.
+shapes. `make live-scenarios` runs bounded local live checks across S01-S12.
 
 ## Runtime CLI
 
@@ -178,10 +179,10 @@ python3 -m evals.runner
 Scripted eval inputs live in `evals/input.yaml`; case names, adversarial flags, and
 expected-failure explanations live in `evals/cases.py`. The current baseline is:
 
-- 16 total cases
-- 14 passing cases
+- 18 total cases
+- 16 passing cases
 - 2 expected failures
-- pass rate 0.875
+- pass rate 0.889
 
 Two passing evals (`I01` and `I02`) exercise the runtime through the real HTTP client
 against the local `mockllm.server`; the rest use deterministic scripted responses for
@@ -189,8 +190,8 @@ speed and failure isolation.
 
 Expected failures are real executed evals, not skipped cases:
 
-- FAIL01: generic false success claim without a concrete failed tool target.
-- FAIL02: transactional rollback across mixed tool batches.
+- FAIL01: `run_python` can create workspace files that are not transactionally rolled back.
+- FAIL02: a queued email cannot be rolled back if a later email in the batch fails.
 
 ## Observability And Replay
 
@@ -247,7 +248,8 @@ SQLite `sent_emails` count. The older raw-command mode is still available with
 - Pending tool calls survive in persisted run state and can be recovered from the event log.
 - Simulated `send_email` uses SQLite idempotency records keyed by logical email payload.
 - Parallel tool batches record every start before any result and isolate failed/hanging tools.
-- Explicit false-success checks reject final claims that contradict concrete failed tool results.
+- Explicit false-success checks reject concrete and generic success claims after failed tools.
+- Side-effect tools are skipped when an earlier sibling tool fails; reversible writes are restored.
 - Interrupted partial tool turns terminate legibly without executing incomplete batches.
 - Tool boundary for file, Python, HTTP, and email tools.
 - Tool results are wrapped as untrusted data before returning to the model.
@@ -266,9 +268,10 @@ SQLite `sent_emails` count. The older raw-command mode is still available with
 ## Known Gaps
 
 - The local mock server is a compatibility shim; final parity still needs the official
-  assessment mock server if it differs from these documented behaviours.
-- Generic false success claims without a concrete failed target are not rejected yet.
-- Successful sibling side effects are not rolled back when another parallel tool fails.
+  assessment mock server if it differs from these documented behaviours. `make live-scenarios`
+  verifies local live S01-S12 behavior.
+- `run_python` can still create workspace files that are not transactionally rolled back.
+- A queued `send_email` cannot be rolled back if a later email in the same batch fails.
 - `run_python` blocks network by monkey-patching `socket` inside isolated Python, not by
   OS-level network namespace/seccomp policy.
 - The local chaos helper is lighter than a full `kill -9` durability test.

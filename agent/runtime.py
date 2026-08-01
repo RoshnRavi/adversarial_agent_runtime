@@ -517,20 +517,94 @@ class AgentRuntime:
         ordered_results: list[ToolResult | None] = [None] * len(calls)
         for index, result in existing_results.items():
             ordered_results[index] = result
-        if calls_to_execute:
-            with ThreadPoolExecutor(max_workers=len(calls_to_execute)) as pool:
+
+        non_side_effect_calls = [
+            (index, call) for index, call in calls_to_execute if not self._is_side_effect_tool(call)
+        ]
+        if non_side_effect_calls:
+            with ThreadPoolExecutor(max_workers=len(non_side_effect_calls)) as pool:
                 futures = [
                     pool.submit(run_one, index, call)
-                    for index, call in calls_to_execute
+                    for index, call in non_side_effect_calls
                 ]
                 for future in futures:
                     index, result = future.result()
                     ordered_results[index] = result
 
+        restored_write_indexes: set[int] = set()
+        write_preimages: list[tuple[int, Path, bytes | None]] = []
+        for index, call in [
+            item for item in calls_to_execute if item[1].name == "write_file"
+        ]:
+            idempotency_key = self._idempotency_key(run_id, call)
+            if self._batch_has_failed_result(ordered_results):
+                ordered_results[index] = self._skipped_side_effect_result(
+                    run_id,
+                    call,
+                    idempotency_key,
+                    "ToolSkippedError: write_file skipped because a sibling tool failed",
+                )
+                continue
+
+            preimage = self._capture_write_preimage(call)
+            result_index, result = run_one(index, call)
+            ordered_results[result_index] = result
+            if result.ok and preimage is not None:
+                write_preimages.append((index, *preimage))
+            elif not result.ok:
+                restored_write_indexes.update(
+                    self._rollback_writes(write_preimages, ordered_results)
+                )
+
+        for index, call in [
+            item for item in calls_to_execute if item[1].name == "send_email"
+        ]:
+            idempotency_key = self._idempotency_key(run_id, call)
+            if self._batch_has_failed_result(ordered_results):
+                ordered_results[index] = self._skipped_side_effect_result(
+                    run_id,
+                    call,
+                    idempotency_key,
+                    "ToolSkippedError: send_email skipped because a sibling tool failed",
+                )
+                continue
+            result_index, result = run_one(index, call)
+            ordered_results[result_index] = result
+            if not result.ok:
+                restored_write_indexes.update(
+                    self._rollback_writes(write_preimages, ordered_results)
+                )
+
         results: list[ToolResult] = []
         for index, result in enumerate(ordered_results):
             if result is None:
                 continue
+            if index in restored_write_indexes:
+                rollback_error = (
+                    "ToolRolledBackError: write_file rolled back because a sibling "
+                    "side effect failed"
+                )
+                self.db.record_tool_execution(
+                    idempotency_key=result.idempotency_key or self._idempotency_key(
+                        run_id,
+                        calls[index],
+                    ),
+                    run_id=run_id,
+                    tool_call_id=result.tool_call_id,
+                    tool_name=result.tool_name,
+                    arguments=calls[index].arguments,
+                    result=result.result,
+                    error=rollback_error,
+                    status="failed",
+                )
+                result = ToolResult(
+                    tool_call_id=result.tool_call_id,
+                    tool_name=result.tool_name,
+                    ok=False,
+                    result=result.result,
+                    error=rollback_error,
+                    idempotency_key=result.idempotency_key,
+                )
             results.append(result)
             payload = {
                 "tool_call_id": result.tool_call_id,
@@ -558,6 +632,14 @@ class AgentRuntime:
         return results
 
     @staticmethod
+    def _is_side_effect_tool(call: ToolCall) -> bool:
+        return call.name in {"write_file", "send_email"}
+
+    @staticmethod
+    def _batch_has_failed_result(results: list[ToolResult | None]) -> bool:
+        return any(result is not None and not result.ok for result in results)
+
+    @staticmethod
     def _tool_result_from_execution(call: ToolCall, existing: dict[str, Any]) -> ToolResult:
         return ToolResult(
             tool_call_id=call.id,
@@ -567,6 +649,63 @@ class AgentRuntime:
             error=existing["error"],
             idempotency_key=existing["idempotency_key"],
         )
+
+    def _skipped_side_effect_result(
+        self,
+        run_id: str,
+        call: ToolCall,
+        idempotency_key: str,
+        error: str,
+    ) -> ToolResult:
+        return self._blocked_tool_result(
+            run_id,
+            call,
+            idempotency_key,
+            error,
+            db=self.db,
+        )
+
+    def _capture_write_preimage(self, call: ToolCall) -> tuple[Path, bytes | None] | None:
+        path = call.arguments.get("path")
+        if not isinstance(path, (str, Path)):
+            return None
+        root = self.config.workspace_root.resolve()
+        target = (root / path).resolve()
+        if not target.is_relative_to(root):
+            return None
+        if not target.exists():
+            return target, None
+        if not target.is_file():
+            return None
+        return target, target.read_bytes()
+
+    @staticmethod
+    def _rollback_writes(
+        write_preimages: list[tuple[int, Path, bytes | None]],
+        ordered_results: list[ToolResult | None],
+    ) -> set[int]:
+        restored: set[int] = set()
+        for index, path, content in reversed(write_preimages):
+            try:
+                if content is None:
+                    if path.exists() and path.is_file():
+                        path.unlink()
+                else:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(content)
+                restored.add(index)
+            except OSError:
+                result = ordered_results[index]
+                if result is not None:
+                    ordered_results[index] = ToolResult(
+                        tool_call_id=result.tool_call_id,
+                        tool_name=result.tool_name,
+                        ok=False,
+                        result=result.result,
+                        error="ToolRollbackError: failed to restore previous file content",
+                        idempotency_key=result.idempotency_key,
+                    )
+        return restored
 
     def _blocked_tool_result(
         self,
@@ -684,8 +823,12 @@ class AgentRuntime:
         success_markers = ("successfully", "succeeded", "success", "completed", "worked")
         if not assistant_text or not any(marker in text for marker in success_markers):
             return None
+        if self._is_failure_acknowledgement(text):
+            return None
 
         failed_results = self._latest_failed_tool_results(run_id, step)
+        if not failed_results:
+            return None
         for failed in failed_results:
             targets = self._failed_tool_targets(failed)
             matched = [target for target in targets if target and target.lower() in text]
@@ -697,7 +840,29 @@ class AgentRuntime:
                     "failed_tool_result": failed.get("tool_result", {}),
                     "failed_tool_arguments": failed.get("arguments", {}),
                 }
-        return None
+        return {
+            "reason": "assistant claimed generic success after a failed tool result",
+            "assistant_text": assistant_text,
+            "matched_targets": [],
+            "failed_tool_results": [
+                failed.get("tool_result", {}) for failed in failed_results
+            ],
+        }
+
+    @staticmethod
+    def _is_failure_acknowledgement(text: str) -> bool:
+        failure_phrases = (
+            "could not complete",
+            "couldn't complete",
+            "cannot complete",
+            "can't complete",
+            "unable to complete",
+            "did not complete",
+            "not completed",
+            "not successful",
+            "unsuccessful",
+        )
+        return any(phrase in text for phrase in failure_phrases)
 
     def _latest_failed_tool_results(self, run_id: str, current_step: int) -> list[dict[str, Any]]:
         events = self.db.get_events(run_id)

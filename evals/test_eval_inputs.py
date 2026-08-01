@@ -1,5 +1,4 @@
 import json
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -42,20 +41,14 @@ def test_all_eval_cases_have_yaml_inputs() -> None:
     assert scripted_case_ids <= set(inputs)
 
 
-def test_expected_failure_cases_are_executed() -> None:
-    inputs = load_eval_inputs()
-    f01 = next(case for case in EVAL_CASES if case.id == "FAIL01")
-    custom_inputs = {
-        "FAIL01": replace(
-            inputs["FAIL01"],
-            responses=[{"content": "done without a failed tool result"}],
-        )
-    }
+@pytest.mark.parametrize("case_id", ["A13", "A14"])
+def test_fixed_gap_cases_now_pass(case_id: str) -> None:
+    case = next(case for case in EVAL_CASES if case.id == case_id)
 
-    passed, detail = run_case(f01, custom_inputs)
+    passed, detail = run_case(case)
 
-    assert not passed
-    assert detail == f01.reason
+    assert passed
+    assert detail == ""
 
 
 @pytest.mark.parametrize("case_id", ["S10", "S11", "S12"])

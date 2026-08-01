@@ -2,7 +2,7 @@ PYTHON ?= $(shell python3 --version >/dev/null 2>&1 && echo python3 || echo pyth
 PIP ?= $(PYTHON) -m pip
 TIMELOG ?= $(PYTHON) scripts/timelog.py
 
-.PHONY: setup test eval run mockllm timelog clean
+.PHONY: setup test eval live-scenarios run mockllm timelog clean
 
 setup:
 	$(TIMELOG) run --note "make setup" -- $(PIP) install -e ".[dev]"
@@ -12,6 +12,9 @@ test:
 
 eval:
 	$(TIMELOG) run --note "make eval" -- $(PYTHON) -m evals.runner
+
+live-scenarios:
+	$(PYTHON) -m evals.live_scenarios
 
 run:
 	$(TIMELOG) run --note "make run: $(TASK)" -- $(PYTHON) -m agent.user run --task "$(TASK)"

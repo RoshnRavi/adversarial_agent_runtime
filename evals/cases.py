@@ -42,17 +42,27 @@ EVAL_CASES: list[EvalCase] = [
     EvalCase("I01", "local mock server HTTP integration"),
     EvalCase("I02", "local mock server S04 bounded termination", adversarial=True),
     EvalCase(
+        "A13",
+        "generic false success claim rejected",
+        adversarial=True,
+    ),
+    EvalCase(
+        "A14",
+        "mixed batch skips side effect after sibling failure",
+        adversarial=True,
+    ),
+    EvalCase(
         "FAIL01",
-        "generic false success claim without target",
+        "run_python filesystem side effect rollback",
         adversarial=True,
         expected_failure=True,
-        reason="runtime only rejects false success claims tied to a concrete failed tool target",
+        reason="run_python can still create workspace files that are not transactionally rolled back",
     ),
     EvalCase(
         "FAIL02",
-        "transactional rollback across mixed tool batch",
+        "multi-email batch atomicity after irreversible send",
         adversarial=True,
         expected_failure=True,
-        reason="runtime isolates parallel tool outcomes but does not roll back successful sibling side effects",
+        reason="a successfully queued email cannot be rolled back if a later email in the batch fails",
     ),
 ]

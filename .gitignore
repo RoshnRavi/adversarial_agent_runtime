@@ -44,6 +44,7 @@ workspace/**
 !workspace/.gitkeep
 
 # Part B is intentionally not part of this Part A submission.
+FRAMEWORK.md
 agent_fw/
 
 # Local config and secrets
