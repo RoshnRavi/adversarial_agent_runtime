@@ -258,8 +258,6 @@ class AgentRuntime:
         self.llm_client = llm_client
         self.validator: AgentValidator = AgentValidator(db, tracer, llm_client)
         self.config = config
-        self._last_tool_hash: str | None = None
-        self._repeat_count = 0
 
     def start_task(self, task: str) -> RunState:
         return self.run_task(str(uuid.uuid4()), task)
@@ -300,6 +298,7 @@ class AgentRuntime:
         while step < self.config.max_steps:
             try:
                 events = self.db.get_events(run_id)
+                self._raise_if_recorded_no_progress(events)
                 if not pending:
                     pending = self._recover_pending_tool_calls(run_id, events, step)
                     if pending:
@@ -578,16 +577,12 @@ class AgentRuntime:
         )
 
     def _check_progress(self, run_id: str, calls: list[ToolCall], step: int) -> None:
-        digest = hashlib.sha256(
-            stable_json(
-                [{"name": call.name, "arguments": call.arguments} for call in calls]
-            ).encode("utf-8")
-        ).hexdigest()
-        if digest == self._last_tool_hash:
-            self._repeat_count += 1
-        else:
-            self._last_tool_hash = digest
-            self._repeat_count = 1
+        digest = self._tool_progress_digest(calls)
+        repeat_count = 1
+        previous = self._latest_progress_check(self.db.get_events(run_id), before_step=step)
+        if previous is not None and previous.get("tool_digest") == digest:
+            previous_count = self._positive_int(previous.get("repeat_count"), 0)
+            repeat_count = previous_count + 1 if previous_count else 1
         self._log_loop_control(
             run_id,
             step,
@@ -595,12 +590,53 @@ class AgentRuntime:
                 "decision": "progress_check",
                 "tool_digest": digest,
                 "tool_count": len(calls),
-                "repeat_count": self._repeat_count,
+                "repeat_count": repeat_count,
                 "no_progress_limit": self.config.no_progress_limit,
             },
         )
-        if self._repeat_count >= self.config.no_progress_limit:
+        if repeat_count >= self.config.no_progress_limit:
             raise NoProgressError("same tool call repeated without progress")
+
+    def _raise_if_recorded_no_progress(self, events: list[Event]) -> None:
+        progress = self._latest_progress_check(events)
+        if progress is None:
+            return
+        repeat_count = self._positive_int(progress.get("repeat_count"), 0)
+        limit = self._positive_int(
+            progress.get("no_progress_limit"),
+            self.config.no_progress_limit,
+        )
+        if repeat_count >= limit:
+            raise NoProgressError("same tool call repeated without progress")
+
+    @staticmethod
+    def _tool_progress_digest(calls: list[ToolCall]) -> str:
+        material = [{"name": call.name, "arguments": call.arguments} for call in calls]
+        return hashlib.sha256(stable_json(material).encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _latest_progress_check(
+        events: list[Event],
+        *,
+        before_step: int | None = None,
+    ) -> dict[str, Any] | None:
+        for event in reversed(events):
+            if event.event_type != "loop_control":
+                continue
+            if event.payload.get("decision") != "progress_check":
+                continue
+            if before_step is not None and (
+                event.step is None or event.step >= before_step
+            ):
+                continue
+            return event.payload
+        return None
+
+    @staticmethod
+    def _positive_int(value: Any, default: int) -> int:
+        if type(value) is int and value > 0:
+            return value
+        return default
 
     def _is_incomplete_partial_turn(self, response: Any) -> bool:
         if not getattr(response, "partial_turn", False):
