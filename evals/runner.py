@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import tempfile
 import threading
 from dataclasses import dataclass, field
@@ -184,6 +186,8 @@ def _optional_positive_int(
 def run_case(case: EvalCase, inputs: dict[str, EvalInput] | None = None) -> tuple[bool, str]:
     if case.id == "I01":
         return _run_local_mock_server_case()
+    if case.id == "I02":
+        return _run_live_s04_case()
 
     eval_inputs = load_eval_inputs() if inputs is None else inputs
     eval_input = eval_inputs.get(case.id)
@@ -300,6 +304,83 @@ def _run_local_mock_server_case() -> tuple[bool, str]:
                 )
                 detail = state.termination_reason or ""
                 return passed, "" if passed else detail or "local mock server S01 failed"
+            finally:
+                db.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+
+
+_LIVE_S04_SCRIPT = """
+import sys
+from pathlib import Path
+
+from agent.message import MemoryManager
+from agent.run import AgentDatabase, TraceWriter
+from agent.runtime import AgentRuntime, RuntimeConfig
+
+tmp = Path(sys.argv[1])
+config = RuntimeConfig(
+    db_path=tmp / "agent.db",
+    trace_dir=tmp / "traces",
+    workspace_root=tmp / "workspace",
+    server_url=sys.argv[2],
+    retry_base_delay=0.0,
+)
+db = AgentDatabase(config.db_path)
+try:
+    runtime = AgentRuntime(
+        db,
+        memory=MemoryManager(config.token_budget),
+        tracer=TraceWriter(config.trace_dir),
+        config=config,
+    )
+    state = runtime.run_task("eval-i02", "exercise local mock server S04")
+    print(f"{state.status}|{state.step_count}|{state.termination_reason or ''}")
+finally:
+    db.close()
+"""
+
+
+def _run_live_s04_case() -> tuple[bool, str]:
+    with tempfile.TemporaryDirectory() as directory:
+        tmp = Path(directory)
+        server = build_server("127.0.0.1", 0, scenario="S04")
+        host, port = server.server_address
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            try:
+                completed = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        _LIVE_S04_SCRIPT,
+                        str(tmp),
+                        f"http://{host}:{port}/chat",
+                    ],
+                    text=True,
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+            except subprocess.TimeoutExpired:
+                return False, "live S04 timed out"
+
+            db = AgentDatabase(tmp / "agent.db")
+            try:
+                state = db.get_run("eval-i02")
+                if state is None:
+                    return False, "live S04 did not create a run"
+                reason = state.termination_reason or ""
+                passed = (
+                    completed.returncode == 0
+                    and state.status == "FINISHED"
+                    and "NoProgressError" in reason
+                )
+                detail = reason or completed.stderr.strip() or completed.stdout.strip()
+                return passed, "" if passed else detail
             finally:
                 db.close()
         finally:

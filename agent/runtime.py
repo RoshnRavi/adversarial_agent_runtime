@@ -466,7 +466,7 @@ class AgentRuntime:
         from .executer import ToolExecutor
         from .run import AgentDatabase
 
-        for call in calls:
+        for index, call in enumerate(calls):
             idempotency_key = self._idempotency_key(run_id, call)
             start_payload = {"tool_call": asdict(call)}
             start_inserted = self.db.append_event(
@@ -474,20 +474,33 @@ class AgentRuntime:
                 "tool_execution_started",
                 start_payload,
                 step=step,
-                idempotency_key=f"start:{idempotency_key}",
+                idempotency_key=self._tool_event_key(
+                    run_id,
+                    "tool_execution_started",
+                    step,
+                    index,
+                    idempotency_key,
+                ),
             )
             if start_inserted is not None:
                 self.tracer.log_trace(run_id, "tool_execution_started", start_payload, step=step)
+
+        existing_results: dict[int, ToolResult] = {}
+        calls_to_execute: list[tuple[int, ToolCall]] = []
+        for index, call in enumerate(calls):
+            idempotency_key = self._idempotency_key(run_id, call)
+            existing = self.db.get_tool_execution(idempotency_key)
+            if existing is not None:
+                existing_results[index] = self._tool_result_from_execution(call, existing)
+            else:
+                calls_to_execute.append((index, call))
 
         def run_one(index: int, call: ToolCall) -> tuple[int, ToolResult]:
             worker_db = AgentDatabase(self.config.db_path)
             try:
                 executor = ToolExecutor(worker_db, run_id=run_id, config=self.config)
                 idempotency_key = self._idempotency_key(run_id, call)
-                existing = worker_db.get_tool_execution(idempotency_key)
-                if existing is not None:
-                    result = executor.execute(call, idempotency_key)
-                elif call.name == "send_email" and memory.has_untrusted_tool_results():
+                if call.name == "send_email" and memory.has_untrusted_tool_results():
                     result = self._blocked_tool_result(
                         run_id,
                         call,
@@ -502,23 +515,23 @@ class AgentRuntime:
                 worker_db.close()
 
         ordered_results: list[ToolResult | None] = [None] * len(calls)
-        with ThreadPoolExecutor(max_workers=len(calls)) as pool:
-            futures = [pool.submit(run_one, index, call) for index, call in enumerate(calls)]
-            for future in futures:
-                index, result = future.result()
-                ordered_results[index] = result
+        for index, result in existing_results.items():
+            ordered_results[index] = result
+        if calls_to_execute:
+            with ThreadPoolExecutor(max_workers=len(calls_to_execute)) as pool:
+                futures = [
+                    pool.submit(run_one, index, call)
+                    for index, call in calls_to_execute
+                ]
+                for future in futures:
+                    index, result = future.result()
+                    ordered_results[index] = result
 
-        results = [result for result in ordered_results if result is not None]
-        for result in results:
-            idempotency_key = result.idempotency_key or self._event_key(
-                run_id,
-                "tool_result",
-                step,
-                {
-                    "tool_call_id": result.tool_call_id,
-                    "tool_name": result.tool_name,
-                },
-            )
+        results: list[ToolResult] = []
+        for index, result in enumerate(ordered_results):
+            if result is None:
+                continue
+            results.append(result)
             payload = {
                 "tool_call_id": result.tool_call_id,
                 "tool_name": result.tool_name,
@@ -532,12 +545,28 @@ class AgentRuntime:
                 "tool_result",
                 payload,
                 step=step,
-                idempotency_key=f"result:{idempotency_key}",
+                idempotency_key=self._tool_result_event_key(
+                    run_id,
+                    step,
+                    index,
+                    result,
+                ),
             )
             if result_inserted is not None:
                 self.tracer.log_trace(run_id, "tool_result", payload, step=step)
                 memory.add_tool_result(result.tool_name, payload)
         return results
+
+    @staticmethod
+    def _tool_result_from_execution(call: ToolCall, existing: dict[str, Any]) -> ToolResult:
+        return ToolResult(
+            tool_call_id=call.id,
+            tool_name=call.name,
+            ok=existing["status"] == "completed" and not existing["error"],
+            result=existing["result"],
+            error=existing["error"],
+            idempotency_key=existing["idempotency_key"],
+        )
 
     def _blocked_tool_result(
         self,
@@ -809,6 +838,43 @@ class AgentRuntime:
     ) -> str:
         digest = hashlib.sha256(stable_json(payload).encode("utf-8")).hexdigest()
         return f"{run_id}:{event_type}:{step}:{digest}"
+
+    @staticmethod
+    def _tool_event_key(
+        run_id: str,
+        event_type: str,
+        step: int,
+        index: int,
+        idempotency_key: str,
+    ) -> str:
+        return f"{run_id}:{event_type}:{step}:{index}:{idempotency_key}"
+
+    def _tool_result_event_key(
+        self,
+        run_id: str,
+        step: int,
+        index: int,
+        result: ToolResult,
+    ) -> str:
+        if result.tool_name == "send_email" and result.idempotency_key:
+            return f"result:{result.idempotency_key}"
+        if result.idempotency_key:
+            return self._tool_event_key(
+                run_id,
+                "tool_result",
+                step,
+                index,
+                result.idempotency_key,
+            )
+        return self._event_key(
+            run_id,
+            "tool_result",
+            step,
+            {
+                "tool_call_id": result.tool_call_id,
+                "tool_name": result.tool_name,
+            },
+        )
 
     def _recover_pending_tool_calls(
         self,

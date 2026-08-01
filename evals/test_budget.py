@@ -1,5 +1,6 @@
 import pytest
 
+import agent.executer as executer_module
 from agent.exceptions import ContextLimitExceededError
 from agent.message import MemoryManager
 from agent.run import AgentDatabase, TraceReader, TraceWriter
@@ -99,6 +100,59 @@ def test_s4_no_progress_terminates_in_bounded_time_with_trace(tmp_path) -> None:
     assert state.termination_reason == "NoProgressError: same tool call repeated without progress"
     assert len(tool_parse_events) == 2
     assert [event["payload"]["repeat_count"] for event in progress_events] == [1, 2]
+    assert traces[-1]["event_type"] == "run_finished"
+    assert "NoProgressError" in traces[-1]["payload"]["reason"]
+    db.close()
+
+
+def test_s4_repeated_same_tool_id_records_per_step_results_without_rerun(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    repeated_call = {
+        "tool_call": {
+            "id": "same-loop-id",
+            "name": "run_python",
+            "arguments": {"code": "print(1)"},
+        }
+    }
+    execution_count = 0
+
+    def fake_run_python(*args, **kwargs):
+        nonlocal execution_count
+        execution_count += 1
+        return executer_module.PythonResult(stdout="1\n", stderr="", returncode=0)
+
+    monkeypatch.setattr(executer_module, "run_python", fake_run_python)
+    runtime, db, config = _runtime(
+        tmp_path,
+        [repeated_call, repeated_call, repeated_call],
+        max_steps=5,
+        no_progress_limit=3,
+    )
+
+    state = runtime.run_task("s4-same-id-run", "detect repeated identical call")
+    events = db.get_events("s4-same-id-run")
+    traces = list(TraceReader(config.trace_dir).read("s4-same-id-run"))
+    progress_counts = [
+        event.payload["repeat_count"]
+        for event in events
+        if event.event_type == "loop_control"
+        and event.payload.get("decision") == "progress_check"
+    ]
+    tool_result_steps = [
+        event.step for event in events if event.event_type == "tool_result"
+    ]
+    tool_start_steps = [
+        event.step for event in events if event.event_type == "tool_execution_started"
+    ]
+
+    assert state.step_count == 3
+    assert state.termination_reason == "NoProgressError: same tool call repeated without progress"
+    assert progress_counts == [1, 2, 3]
+    assert tool_start_steps == [1, 2]
+    assert tool_result_steps == [1, 2]
+    assert execution_count == 1
     assert traces[-1]["event_type"] == "run_finished"
     assert "NoProgressError" in traces[-1]["payload"]["reason"]
     db.close()

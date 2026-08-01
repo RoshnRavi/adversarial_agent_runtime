@@ -40,6 +40,7 @@ EVAL_CASES: list[EvalCase] = [
         adversarial=True,
     ),
     EvalCase("I01", "local mock server HTTP integration"),
+    EvalCase("I02", "local mock server S04 bounded termination", adversarial=True),
     EvalCase(
         "FAIL01",
         "generic false success claim without target",

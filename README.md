@@ -9,7 +9,7 @@ implementation lives in `agent/`; Part B is intentionally excluded until it is r
 - Runtime defaults: `agent/config_agent.yaml`
 - Persistence and replay: SQLite plus JSONL traces in `agent/run.py`
 - Local tools: `read_file`, `write_file`, `run_python`, `http_get`, `send_email`
-- Evals: 15 named cases, currently 13 passing and 2 expected failures
+- Evals: 16 named cases, currently 14 passing and 2 expected failures
 - Live `run` commands require a mock LLM server already listening at the configured
   `server_url`, default `http://localhost:8000/chat`
 
@@ -178,14 +178,14 @@ python3 -m evals.runner
 Scripted eval inputs live in `evals/input.yaml`; case names, adversarial flags, and
 expected-failure explanations live in `evals/cases.py`. The current baseline is:
 
-- 15 total cases
-- 13 passing cases
+- 16 total cases
+- 14 passing cases
 - 2 expected failures
-- pass rate 0.867
+- pass rate 0.875
 
-One passing eval (`I01`) exercises the runtime through the real HTTP client against the
-local `mockllm.server`; the rest use deterministic scripted responses for speed and
-failure isolation.
+Two passing evals (`I01` and `I02`) exercise the runtime through the real HTTP client
+against the local `mockllm.server`; the rest use deterministic scripted responses for
+speed and failure isolation.
 
 Expected failures are real executed evals, not skipped cases:
 

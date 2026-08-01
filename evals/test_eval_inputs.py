@@ -37,7 +37,7 @@ def test_load_eval_inputs_s08_token_budget_and_content() -> None:
 
 def test_all_eval_cases_have_yaml_inputs() -> None:
     inputs = load_eval_inputs()
-    scripted_case_ids = {case.id for case in EVAL_CASES if case.id != "I01"}
+    scripted_case_ids = {case.id for case in EVAL_CASES if not case.id.startswith("I")}
 
     assert scripted_case_ids <= set(inputs)
 
