@@ -105,6 +105,9 @@ def _blocked_socket(*args, **kwargs):
 socket.socket = _blocked_socket
 socket.create_connection = _blocked_socket
 """
+    posix_only_kwargs: dict[str, Any] = (
+        {"preexec_fn": lambda: _limit_child(memory_mb)} if sys.platform != "win32" else {}
+    )
     try:
         completed = subprocess.run(
             [sys.executable, "-I", "-c", network_block + "\n" + code],
@@ -113,7 +116,7 @@ socket.create_connection = _blocked_socket
             capture_output=True,
             timeout=timeout_seconds,
             check=False,
-            preexec_fn=lambda: _limit_child(memory_mb),
+            **posix_only_kwargs,
         )
         return PythonResult(
             stdout=completed.stdout,
