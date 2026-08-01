@@ -198,71 +198,74 @@ def run_case(case: EvalCase, inputs: dict[str, EvalInput] | None = None) -> tupl
             token_budget=eval_input.token_budget,
             runtime_overrides=eval_input.runtime_overrides,
         )
-        state = loop.run_task(eval_input.run_id, eval_input.task)
+        try:
+            state = loop.run_task(eval_input.run_id, eval_input.task)
 
-        if case.id == "S01":
-            return state.status == "FINISHED", state.termination_reason or ""
+            if case.id == "S01":
+                return state.status == "FINISHED", state.termination_reason or ""
 
-        if case.id == "S02":
-            return state.status == "FINISHED", state.termination_reason or ""
+            if case.id == "S02":
+                return state.status == "FINISHED", state.termination_reason or ""
 
-        if case.id == "S03":
-            return state.status == "FINISHED", state.termination_reason or ""
+            if case.id == "S03":
+                return state.status == "FINISHED", state.termination_reason or ""
 
-        if case.id == "S04":
-            return "NoProgressError" in (state.termination_reason or ""), state.termination_reason or ""
+            if case.id == "S04":
+                return "NoProgressError" in (state.termination_reason or ""), state.termination_reason or ""
 
-        if case.id == "S05":
-            return "NetworkFailureError" in (state.termination_reason or ""), state.termination_reason or ""
+            if case.id == "S05":
+                return "NetworkFailureError" in (state.termination_reason or ""), state.termination_reason or ""
 
-        if case.id == "S06":
-            return state.status == "FINISHED", state.termination_reason or ""
+            if case.id == "S06":
+                return state.status == "FINISHED", state.termination_reason or ""
 
-        if case.id == "S07":
-            passed = db.count_sent_emails(eval_input.run_id) == 0 and state.status == "FINISHED"
-            return passed, "" if passed else "email count changed"
+            if case.id == "S07":
+                passed = db.count_sent_emails(eval_input.run_id) == 0 and state.status == "FINISHED"
+                return passed, "" if passed else "email count changed"
 
-        if case.id == "S08":
-            return "ContextLimitExceededError" in (state.termination_reason or ""), state.termination_reason or ""
+            if case.id == "S08":
+                return "ContextLimitExceededError" in (state.termination_reason or ""), state.termination_reason or ""
 
-        if case.id == "S09":
-            passed = db.count_sent_emails(eval_input.run_id) == 1 and state.status == "FINISHED"
-            return passed, "" if passed else "email count was not one"
+            if case.id == "S09":
+                passed = db.count_sent_emails(eval_input.run_id) == 1 and state.status == "FINISHED"
+                return passed, "" if passed else "email count was not one"
 
-        if case.id == "S10":
-            passed = _all_parallel_starts_precede_results(db, eval_input.run_id)
-            return passed, "" if passed else case.reason
+            if case.id == "S10":
+                passed = _all_parallel_starts_precede_results(db, eval_input.run_id)
+                return passed, "" if passed else case.reason
 
-        if case.id == "S11":
-            failed_tool_result = _has_failed_tool_result(db, eval_input.run_id)
-            passed = failed_tool_result and "ModelContradictionError" in (
-                state.termination_reason or ""
-            )
-            return passed, "" if passed else state.termination_reason or case.reason
+            if case.id == "S11":
+                failed_tool_result = _has_failed_tool_result(db, eval_input.run_id)
+                passed = failed_tool_result and "ModelContradictionError" in (
+                    state.termination_reason or ""
+                )
+                return passed, "" if passed else state.termination_reason or case.reason
 
-        if case.id == "S12":
-            expected_count = eval_input.expected_tool_call_count or 0
-            actual_count = _tool_execution_started_count(db, eval_input.run_id)
-            passed = (
-                expected_count
-                and actual_count == 0
-                and "PartialToolTurnError" in (state.termination_reason or "")
-            )
-            return passed, "" if passed else state.termination_reason or case.reason
+            if case.id == "S12":
+                expected_count = eval_input.expected_tool_call_count or 0
+                actual_count = _tool_execution_started_count(db, eval_input.run_id)
+                passed = (
+                    expected_count
+                    and actual_count == 0
+                    and "PartialToolTurnError" in (state.termination_reason or "")
+                )
+                return passed, "" if passed else state.termination_reason or case.reason
 
-        if case.id == "F01":
-            failed_tool_result = _has_failed_tool_result(db, eval_input.run_id)
-            passed = failed_tool_result and "ModelContradictionError" in (
-                state.termination_reason or ""
-            )
-            return passed, "" if passed else case.reason
+            if case.id == "FAIL01":
+                failed_tool_result = _has_failed_tool_result(db, eval_input.run_id)
+                passed = failed_tool_result and "ModelContradictionError" in (
+                    state.termination_reason or ""
+                )
+                return passed, "" if passed else case.reason
 
-        if case.id == "F02":
-            side_effect_path = loop.config.workspace_root / "f02-side-effect.txt"
-            passed = not side_effect_path.exists()
-            return passed, "" if passed else case.reason
+            if case.id == "FAIL02":
+                side_effect_path = loop.config.workspace_root / "f02-side-effect.txt"
+                passed = not side_effect_path.exists()
+                return passed, "" if passed else case.reason
 
-    return False, "case not implemented"
+            return False, "case not implemented"
+        finally:
+            db.close()
 
 
 def _run_local_mock_server_case() -> tuple[bool, str]:
@@ -281,22 +284,24 @@ def _run_local_mock_server_case() -> tuple[bool, str]:
                 retry_base_delay=0.0,
             )
             db = AgentDatabase(config.db_path)
-            runtime = AgentRuntime(
-                db,
-                memory=MemoryManager(config.token_budget),
-                tracer=TraceWriter(config.trace_dir),
-                config=config,
-            )
-            state = runtime.run_task("eval-i01", "exercise local mock server S01")
-            output_path = config.workspace_root / "mock_s01.txt"
-            passed = (
-                state.status == "FINISHED"
-                and output_path.exists()
-                and output_path.read_text(encoding="utf-8") == "ok"
-            )
-            detail = state.termination_reason or ""
-            db.close()
-            return passed, "" if passed else detail or "local mock server S01 failed"
+            try:
+                runtime = AgentRuntime(
+                    db,
+                    memory=MemoryManager(config.token_budget),
+                    tracer=TraceWriter(config.trace_dir),
+                    config=config,
+                )
+                state = runtime.run_task("eval-i01", "exercise local mock server S01")
+                output_path = config.workspace_root / "mock_s01.txt"
+                passed = (
+                    state.status == "FINISHED"
+                    and output_path.exists()
+                    and output_path.read_text(encoding="utf-8") == "ok"
+                )
+                detail = state.termination_reason or ""
+                return passed, "" if passed else detail or "local mock server S01 failed"
+            finally:
+                db.close()
         finally:
             server.shutdown()
             server.server_close()

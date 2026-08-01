@@ -104,6 +104,43 @@ def test_s4_no_progress_terminates_in_bounded_time_with_trace(tmp_path) -> None:
     db.close()
 
 
+def test_s4_no_progress_state_is_scoped_to_each_run(tmp_path) -> None:
+    first_call = {
+        "tool_call": {
+            "id": "first-run-call",
+            "name": "run_python",
+            "arguments": {"code": "print(1)"},
+        }
+    }
+    second_call = {
+        "tool_call": {
+            "id": "second-run-call",
+            "name": "run_python",
+            "arguments": {"code": "print(1)"},
+        }
+    }
+    runtime, db, config = _runtime(
+        tmp_path,
+        [first_call, {"content": "done"}, second_call, {"content": "done"}],
+        max_steps=5,
+        no_progress_limit=2,
+    )
+
+    first_state = runtime.run_task("s4-first-run", "run once")
+    second_state = runtime.run_task("s4-second-run", "run once again")
+    second_progress = [
+        event
+        for event in TraceReader(config.trace_dir).read("s4-second-run")
+        if event["event_type"] == "loop_control"
+        and event["payload"]["decision"] == "progress_check"
+    ]
+
+    assert first_state.termination_reason == "completed"
+    assert second_state.termination_reason == "completed"
+    assert [event["payload"]["repeat_count"] for event in second_progress] == [1]
+    db.close()
+
+
 def test_cumulative_cost_budget_terminates_gracefully(tmp_path) -> None:
     runtime, db, config = _runtime(
         tmp_path,

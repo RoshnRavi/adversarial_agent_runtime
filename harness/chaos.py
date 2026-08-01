@@ -16,6 +16,10 @@ if str(REPO_ROOT) not in sys.path:
 
 from agent.run import AgentDatabase
 
+# process.kill() maps to TerminateProcess(handle, 1) on Windows (no real SIGKILL there),
+# so a killed process's returncode is 1 on Windows vs. -SIGKILL on POSIX.
+_KILLED_RETURNCODE = 1 if sys.platform == "win32" else -signal.SIGKILL
+
 
 def build_agent_command(
     *,
@@ -82,7 +86,7 @@ def run_agent_chaos(
         if process.poll() is None:
             process.kill()
             process.wait()
-        failures += process.returncode not in (0, -signal.SIGKILL)
+        failures += process.returncode not in (0, _KILLED_RETURNCODE)
 
     final = subprocess.run(
         build_agent_command(

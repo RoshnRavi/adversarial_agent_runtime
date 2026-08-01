@@ -1,4 +1,4 @@
-PYTHON ?= python3
+PYTHON ?= $(shell python3 --version >/dev/null 2>&1 && echo python3 || echo python)
 PIP ?= $(PYTHON) -m pip
 TIMELOG ?= $(PYTHON) scripts/timelog.py
 

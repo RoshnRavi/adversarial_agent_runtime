@@ -26,17 +26,18 @@ class BombLLM:
         raise AssertionError(f"model should not be called: {payload}")
 
 
-def _config(tmp_path: Path) -> RuntimeConfig:
+def _config(tmp_path: Path, **overrides) -> RuntimeConfig:
     return RuntimeConfig(
         db_path=tmp_path / "agent.db",
         trace_dir=tmp_path / "traces",
         workspace_root=tmp_path / "workspace",
         retry_base_delay=0.0,
+        **overrides,
     )
 
 
-def _runtime(tmp_path: Path, responses=None, *, llm_client=None):
-    config = _config(tmp_path)
+def _runtime(tmp_path: Path, responses=None, *, llm_client=None, **config_overrides):
+    config = _config(tmp_path, **config_overrides)
     db = AgentDatabase(config.db_path)
     runtime = AgentRuntime(
         db,
@@ -54,6 +55,24 @@ def _email_call(call_id: str = "email") -> ToolCall:
         name="send_email",
         arguments={"to": "a@example.com", "subject": "Hi", "body": "Once"},
     )
+
+
+def _loop_call(call_id: str = "loop") -> ToolCall:
+    return ToolCall(
+        id=call_id,
+        name="run_python",
+        arguments={"code": "print(1)"},
+    )
+
+
+def _loop_response(call: ToolCall) -> dict:
+    return {
+        "tool_call": {
+            "id": call.id,
+            "name": call.name,
+            "arguments": call.arguments,
+        }
+    }
 
 
 def _pending_payload(call: ToolCall) -> list[dict]:
@@ -292,4 +311,124 @@ def test_resume_retries_same_step_after_in_flight_llm_request(tmp_path: Path) ->
     assert state.status == "FINISHED"
     assert state.step_count == 1
     assert client.calls[0]["step"] == 1
+    db.close()
+
+
+def test_resume_restores_s4_repeat_count_before_executing_next_repeat(
+    tmp_path: Path,
+) -> None:
+    first_call = _loop_call("loop-1")
+    second_call = _loop_call("loop-2")
+    runtime, db, _config = _runtime(
+        tmp_path,
+        [_loop_response(second_call), {"content": "done"}],
+        no_progress_limit=2,
+    )
+    db.create_run("resume-s4-run", "detect loop")
+    db.update_run("resume-s4-run", status="CALLING_LLM", step_count=1)
+    first_idempotency_key = runtime._idempotency_key("resume-s4-run", first_call)
+    db.append_event(
+        "resume-s4-run",
+        "llm_response",
+        _loop_response(first_call),
+        step=1,
+        idempotency_key="resume-s4-run:llm_response:1",
+    )
+    db.append_event(
+        "resume-s4-run",
+        "tool_calls_parsed",
+        {"tool_calls": _pending_payload(first_call)},
+        step=1,
+        idempotency_key="resume-s4-run:tool_calls_parsed:1",
+    )
+    db.append_event(
+        "resume-s4-run",
+        "loop_control",
+        {
+            "decision": "progress_check",
+            "tool_digest": runtime._tool_progress_digest([first_call]),
+            "tool_count": 1,
+            "repeat_count": 1,
+            "no_progress_limit": 2,
+        },
+        step=1,
+        idempotency_key="resume-s4-run:progress:1",
+    )
+    db.append_event(
+        "resume-s4-run",
+        "tool_result",
+        {
+            "tool_call_id": first_call.id,
+            "tool_name": first_call.name,
+            "ok": True,
+            "result": "1\n",
+            "error": None,
+            "idempotency_key": first_idempotency_key,
+        },
+        step=1,
+        idempotency_key=f"result:{first_idempotency_key}",
+    )
+
+    state = runtime.resume("resume-s4-run")
+    events = db.get_events("resume-s4-run")
+    progress_counts = [
+        event.payload["repeat_count"]
+        for event in events
+        if event.event_type == "loop_control"
+        and event.payload.get("decision") == "progress_check"
+    ]
+
+    assert state.termination_reason == "NoProgressError: same tool call repeated without progress"
+    assert progress_counts == [1, 2]
+    assert not any(
+        event.event_type == "tool_execution_started" and event.step == 2
+        for event in events
+    )
+    db.close()
+
+
+def test_resume_finishes_terminal_s4_progress_without_executing_pending_call(
+    tmp_path: Path,
+) -> None:
+    call = _loop_call("terminal-loop")
+    runtime, db, _config = _runtime(
+        tmp_path,
+        llm_client=BombLLM(),
+        no_progress_limit=2,
+    )
+    db.create_run("terminal-s4-run", "detect loop")
+    db.update_run(
+        "terminal-s4-run",
+        status="RUNNING_TOOLS",
+        step_count=2,
+        pending_tool_calls=_pending_payload(call),
+    )
+    db.append_event(
+        "terminal-s4-run",
+        "tool_calls_parsed",
+        {"tool_calls": _pending_payload(call)},
+        step=2,
+        idempotency_key="terminal-s4-run:tool_calls_parsed:2",
+    )
+    db.append_event(
+        "terminal-s4-run",
+        "loop_control",
+        {
+            "decision": "progress_check",
+            "tool_digest": runtime._tool_progress_digest([call]),
+            "tool_count": 1,
+            "repeat_count": 2,
+            "no_progress_limit": 2,
+        },
+        step=2,
+        idempotency_key="terminal-s4-run:progress:2",
+    )
+
+    state = runtime.resume("terminal-s4-run")
+    events = db.get_events("terminal-s4-run")
+
+    assert state.status == "FINISHED"
+    assert state.pending_tool_calls == []
+    assert state.termination_reason == "NoProgressError: same tool call repeated without progress"
+    assert not any(event.event_type == "tool_execution_started" for event in events)
     db.close()

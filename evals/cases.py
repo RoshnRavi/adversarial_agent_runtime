@@ -41,14 +41,14 @@ EVAL_CASES: list[EvalCase] = [
     ),
     EvalCase("I01", "local mock server HTTP integration"),
     EvalCase(
-        "F01",
+        "FAIL01",
         "generic false success claim without target",
         adversarial=True,
         expected_failure=True,
         reason="runtime only rejects false success claims tied to a concrete failed tool target",
     ),
     EvalCase(
-        "F02",
+        "FAIL02",
         "transactional rollback across mixed tool batch",
         adversarial=True,
         expected_failure=True,

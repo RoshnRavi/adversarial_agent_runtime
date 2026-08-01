@@ -189,8 +189,8 @@ failure isolation.
 
 Expected failures are real executed evals, not skipped cases:
 
-- F01: generic false success claim without a concrete failed tool target.
-- F02: transactional rollback across mixed tool batches.
+- FAIL01: generic false success claim without a concrete failed tool target.
+- FAIL02: transactional rollback across mixed tool batches.
 
 ## Observability And Replay
 

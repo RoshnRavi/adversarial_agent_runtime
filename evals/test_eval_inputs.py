@@ -44,10 +44,10 @@ def test_all_eval_cases_have_yaml_inputs() -> None:
 
 def test_expected_failure_cases_are_executed() -> None:
     inputs = load_eval_inputs()
-    f01 = next(case for case in EVAL_CASES if case.id == "F01")
+    f01 = next(case for case in EVAL_CASES if case.id == "FAIL01")
     custom_inputs = {
-        "F01": replace(
-            inputs["F01"],
+        "FAIL01": replace(
+            inputs["FAIL01"],
             responses=[{"content": "done without a failed tool result"}],
         )
     }
@@ -68,7 +68,7 @@ def test_s10_to_s12_cases_now_pass(case_id: str) -> None:
     assert detail == ""
 
 
-@pytest.mark.parametrize("case_id", ["F01", "F02"])
+@pytest.mark.parametrize("case_id", ["FAIL01", "FAIL02"])
 def test_expected_failure_cases_return_documented_reasons(case_id: str) -> None:
     case = next(case for case in EVAL_CASES if case.id == case_id)
 

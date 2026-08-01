@@ -173,7 +173,7 @@ cases:
               content: only the first call arrived
       - content: done
 
-  F01:
+  FAIL01:
     run_id: eval-f01
     task: reject generic false success after a failed tool
     responses:
@@ -184,7 +184,7 @@ cases:
             path: missing-f01.txt
       - content: Everything succeeded.
 
-  F02:
+  FAIL02:
     run_id: eval-f02
     task: roll back successful sibling side effects when a parallel batch fails
     responses:
