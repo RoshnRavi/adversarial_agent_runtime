@@ -5,30 +5,55 @@ implementation lives in `agent/`; Part B is intentionally excluded until it is r
 
 ## Current Status
 
-- Preferred CLI: `python3 -m agent.user ...`
+- Preferred runtime CLI: `python3 -m agent.user ...`
+- Installed console script after `make setup`: `agent ...`
 - Runtime defaults: `agent/config_agent.yaml`
 - Persistence and replay: SQLite plus JSONL traces in `agent/run.py`
-- Local tools: `read_file`, `write_file`, `run_python`, `http_get`, `send_email`
+- Exposed tools: `read_file`, `write_file`, `run_python`, `http_get`, `send_email`
 - Evals: 18 named cases, currently 16 passing and 2 expected failures
-- Live `run` commands require a mock LLM server already listening at the configured
+- Live `run` commands require a mock LLM server listening at the configured
   `server_url`, default `http://localhost:8000/chat`
 
-This checkout includes a small stdlib local server in `mockllm/server.py` for smoke tests
-against the documented S1-S12 behaviours. If the official assessment mock server is
-provided separately, use that server for final parity checks.
+This checkout includes a small stdlib local server in `mockllm/server.py` for smoke
+tests against the documented S01-S12 behaviours. If the official assessment mock
+server is provided separately, use that server for final parity checks.
+
+## What Does Not Work / Not Fully Proven
+
+- Official assessment-server parity is not proven without the official server; this repo
+  only proves parity against the included local compatibility server.
+- `run_python` can still create workspace files that are not transactionally rolled back.
+- A queued `send_email` cannot be rolled back if a later email in the same batch fails.
+- `run_python` blocks network by monkey-patching Python sockets, not by OS-level
+  network namespace or seccomp isolation.
+- The local chaos helper is lighter than a full external `kill -9` durability grader.
+- Part B is not implemented in this Part A submission.
+
+## Tool Surface
+
+The runtime exposes all tools required by Part A through `agent/executer.py`:
+
+| Tool | Exposed | Runtime behavior |
+| --- | --- | --- |
+| `read_file(path)` | Yes | Reads UTF-8 text confined to `workspace/`. Path escapes are rejected. |
+| `write_file(path, content)` | Yes | Writes UTF-8 text confined to `workspace/`. Path escapes are rejected. |
+| `run_python(code)` | Yes | Runs code in a subprocess with wall-clock timeout, memory cap, and best-effort no-network socket monkey-patch. |
+| `http_get(url)` | Yes | Fetches only allow-listed hosts from `agent/config_agent.yaml`; refusals are returned as legible tool errors. |
+| `send_email(to, subject, body)` | Yes | Simulated but treated as irreversible. Appends exactly-once logical sends to SQLite `sent_emails`. |
 
 ## Project Layout
 
 - `agent/`: Part A runtime package.
   - `user.py`: user-facing CLI for `run`, `resume`, and `replay`.
-  - `runtime.py`: run IDs, loop/step control, runtime config, DTOs.
-  - `message.py`: message window, tool-result messages, context compaction.
-  - `validate.py`: mock LLM HTTP client, retries, circuit breaker, per-turn validation.
+  - `runtime.py`: agent loop, loop control, side-effect ordering, runtime config.
+  - `message.py`: message window, untrusted tool-result messages, context compaction.
+  - `validate.py`: mock LLM HTTP client, retries, circuit breaker, turn validation.
   - `response.py`: parses final text, tool calls, and malformed response parts.
-  - `executer.py`: local tool execution and safety checks.
+  - `executer.py`: local tool registry, execution, and safety checks.
   - `run.py`: SQLite state/events, pending tool calls, JSONL trace, replay.
   - `config_agent.yaml`: default paths, limits, server URL, and tool policy.
-- `evals/`: pytest tests, eval runner, YAML scripted inputs, case definitions, and baseline.
+- `evals/`: pytest tests, eval runner, YAML scripted inputs, case definitions, baseline,
+  and `live_scenarios.py` for local S01-S12 live checks.
 - `harness/`: chaos helper for interruption testing.
 - `mockllm/`: deterministic tokenizer, scenario YAML, and local HTTP mock server.
 - `scripts/`: support scripts, currently `timelog.py`.
@@ -41,47 +66,87 @@ provided separately, use that server for final parity checks.
 - SQLite through Python's standard `sqlite3` module.
 - PyYAML, installed from project dependencies.
 - A terminal.
-- A separate local mock LLM server for live `run` commands.
+- Network access for `make setup` if dependencies are not already installed.
+- Localhost socket binding for live scenario checks.
 
-`make test`, `make eval`, and `replay` do not require the mock server.
+`make test`, `make eval`, and `replay` do not need a separately started mock server.
+`make live-scenarios` starts local mock servers internally. Manual live `run` commands
+need a mock server already listening at the configured `server_url`.
 
-## Setup
+## Clean Checkout Verification Runbook
 
-```bash
-make setup
-```
+Run these from the repository root.
 
-`make setup` installs the package in editable mode with development dependencies.
+1. Install the package and dev dependencies.
 
-## Quick Start
+   ```bash
+   make setup
+   ```
 
-No-server checks:
+   Expected: editable install succeeds. This target updates `TIMELOG.md`.
 
-```bash
-make test
-make eval
-agent replay <actual_run_id>
-python3 -m agent.user replay <actual_run_id>
-```
+2. Run the unit and regression tests.
 
-Live run, only after a mock server is listening at `server_url`:
+   ```bash
+   make test
+   ```
 
-```bash
-python3 -m agent.user run --task "write a report"
-```
+   Expected: pytest passes. Current expected count is `106 passed`.
 
-Use the printed `run_id` for resume and replay:
+3. Run the eval suite and baseline comparison.
 
-```bash
-python3 -m agent.user resume b4b4b7fd-9768-44c5-ba01-7410a5b90e35
-agent replay b4b4b7fd-9768-44c5-ba01-7410a5b90e35
-python3 -m agent.user replay b4b4b7fd-9768-44c5-ba01-7410a5b90e35
-```
+   ```bash
+   make eval
+   ```
 
-Do not include angle brackets literally; `<run_id>` in examples means replace it with
-the actual ID printed by `run`.
+   Expected: `18` total cases, `16` passing, `2` expected failures,
+   `0` unexpected failures, pass rate `0.889`, and `baseline diff: none`.
 
-## Make Targets
+4. Run local live S01-S12 parity checks.
+
+   ```bash
+   make live-scenarios
+   ```
+
+   Expected: every line from `S01 PASS` through `S12 PASS`, then:
+
+   ```json
+   {"failures": 0, "total": 12}
+   ```
+
+5. Optional manual live smoke test.
+
+   Terminal A:
+
+   ```bash
+   python3 -m mockllm.server --scenario S01 --port 8000
+   ```
+
+   Terminal B:
+
+   ```bash
+   python3 -m agent.user \
+     --db runs/manual-s01.db \
+     --server-url http://127.0.0.1:8000/chat \
+     run --run-id manual-s01 --task "exercise S01"
+   ```
+
+   Expected: stdout shows `run_id=manual-s01` and `status=FINISHED`. Verify:
+
+   ```bash
+   test -f runs/manual-s01.db
+   test -f runs/traces/manual-s01.jsonl
+   test "$(cat workspace/mock_s01.txt)" = "ok"
+   ```
+
+   Stop the server in Terminal A with `Ctrl-C`.
+
+## CLI / Make Target Reference
+
+Use `python3 -m agent.user` when running from source. After `make setup`, the `agent`
+console script is also available for replay.
+
+### Make Targets
 
 ```bash
 make setup
@@ -94,36 +159,84 @@ make timelog HOURS="0.25" NOTE="design review and write-up"
 make clean
 ```
 
+- `make setup`: installs the package in editable mode with development dependencies.
+- `make test`: runs `python3 -m pytest`.
+- `make eval`: runs `python3 -m evals.runner` and compares against
+  `evals/baseline.json`.
+- `make live-scenarios`: starts local mock servers internally and checks S01-S12.
+- `make mockllm SCENARIO=S01`: starts the local mock server at
+  `http://127.0.0.1:8000/chat`.
+- `make run TASK="..."`: runs the agent against the configured server URL.
+- `make timelog HOURS="0.25" NOTE="..."`: records a manual time entry.
+- `make clean`: removes local test/cache artifacts.
+
 `setup`, `test`, `eval`, and `run` are wrapped by `scripts/timelog.py`, so they update
-`TIMELOG.md` automatically after the command finishes. Failed commands are logged too,
-because they still count as assessment work.
+`TIMELOG.md` automatically after the command finishes. Failed commands are logged too.
 
-`make mockllm SCENARIO=S01` starts the local mock server at
-`http://127.0.0.1:8000/chat`. Use `S01` through `S12` for the documented scenario
-shapes. `make live-scenarios` runs bounded local live checks across S01-S12.
+### Mock Server CLI
 
-## Runtime CLI
+Start a specific documented scenario:
+
+```bash
+python3 -m mockllm.server --scenario S04 --port 8000
+```
+
+Useful variants:
+
+```bash
+python3 -m mockllm.server --scenario S01
+python3 -m mockllm.server --host 127.0.0.1 --port 8774 --scenario S09
+curl http://127.0.0.1:8000/health
+```
+
+Stop the server with `Ctrl-C`.
+
+### Runtime CLI
+
+Show help:
 
 ```bash
 python3 -m agent.user --help
-python3 -m agent.user run --task "write a file"
-python3 -m agent.user run --run-id r2-check --task "send exactly one email"
-python3 -m agent.user resume <actual_run_id>
-agent replay <actual_run_id>
-python3 -m agent.user replay <actual_run_id>
 ```
 
-Optional global overrides:
+Run a live task against a server:
 
 ```bash
 python3 -m agent.user \
-  --db runs/dev-agent.db \
-  --server-url http://localhost:8000/chat \
-  run --task "write a report"
+  --db runs/dev.db \
+  --server-url http://127.0.0.1:8000/chat \
+  run --run-id demo-s01 --task "exercise S01"
 ```
 
-- `--db`: overrides the SQLite database path from `agent/config_agent.yaml`.
-- `--server-url`: overrides the mock model endpoint from `agent/config_agent.yaml`.
+Resume the same run:
+
+```bash
+python3 -m agent.user --db runs/dev.db resume demo-s01
+```
+
+Replay without a model server:
+
+```bash
+python3 -m agent.user replay demo-s01
+agent replay demo-s01
+```
+
+Run using default config values:
+
+```bash
+python3 -m agent.user run --task "write a file"
+python3 -m agent.user run --run-id r2-check --task "send exactly one email"
+python3 -m agent.user resume r2-check
+```
+
+Global options:
+
+- `--db`: SQLite database path. Default: `runs/agent_events.db`.
+- `--server-url`: mock model endpoint. Default: `http://localhost:8000/chat`.
+- `run --run-id`: optional deterministic run ID.
+- `run --task`: required task string.
+- `resume <run_id>`: continue a persisted run.
+- `replay <run_id>`: replay recorded trace events without contacting the model or tools.
 
 If a live run fails with:
 
@@ -132,8 +245,110 @@ NetworkFailureError: mock server failed: <urlopen error [Errno 111] Connection r
 ```
 
 then no process is listening at the configured mock server URL. Start the assessment
-mock server, run `make mockllm SCENARIO=S01`, or change `server_url` to the correct
-endpoint.
+mock server, run `make mockllm SCENARIO=S01`, or pass the correct `--server-url`.
+
+### Chaos Harness CLI
+
+Start an S09 mock server in Terminal A:
+
+```bash
+python3 -m mockllm.server --scenario S09 --port 8000
+```
+
+Run the chaos check in Terminal B:
+
+```bash
+python3 harness/chaos.py \
+  --attempts 100 \
+  --db runs/chaos-s09.db \
+  --run-id chaos-s09 \
+  --task "exercise S09" \
+  --server-url http://127.0.0.1:8000/chat \
+  --assert-email-count 1
+```
+
+Expected: command exits `0`. Optional SQLite verification:
+
+```bash
+python3 - <<'PY'
+import sqlite3
+conn = sqlite3.connect("runs/chaos-s09.db")
+count = conn.execute(
+    "SELECT COUNT(*) FROM sent_emails WHERE run_id = ?",
+    ("chaos-s09",),
+).fetchone()[0]
+print(count)
+PY
+```
+
+Expected output: `1`.
+
+The older raw-command chaos mode is still available:
+
+```bash
+python3 harness/chaos.py --attempts 10 -- python3 -m agent.user --help
+```
+
+## Requirement Verification Matrix
+
+| Requirement | How to verify | Expected result |
+| --- | --- | --- |
+| R1 - Agent loop survives S01-S12 | Run `make live-scenarios` and `make eval`. | Local S01-S12 all pass; eval cases S01-S12 pass or terminate with the expected legible reason. |
+| R2 - Durability and exactly-once side effects | Start S09 mock server, run `python3 harness/chaos.py ... --assert-email-count 1`, then check SQLite `sent_emails`. | Chaos command exits `0`; email count for the run is exactly `1`. |
+| R3 - Context budget | Run `make eval`; inspect `agent/config_agent.yaml` for `token_budget: 8000`. | S08 terminates with `ContextLimitExceededError`; requests are measured with `mockllm/tokenizer.py`. |
+| R4 - Injection resistance | Run `make eval` and `make test`; inspect S07 result and red-team tests. | S07 finishes with zero sent emails; visible red-team tests pass. |
+| R5 - Loop and budget control | Run `make eval`; inspect S04 result and config limits. | S04 terminates with `NoProgressError`; step, no-progress, token, and cost limits are configured. |
+| R6 - Observability and replay | Run a live scenario, stop the server, then run `python3 -m agent.user replay <run_id>`. | SQLite events and `runs/traces/<run_id>.jsonl` exist; replay succeeds without a server. |
+| R7 - Evals | Run `make eval`. | Baseline diff is none; there are 18 cases, at least 4 adversarial, and exactly 2 expected failures. |
+
+R8 is documented in `DECISIONS.md`, which stays under the 1,000-word limit and names
+remaining unsafe areas and tradeoffs.
+
+## S01-S12 Behavior Verification
+
+Automated local check:
+
+```bash
+make live-scenarios
+```
+
+Manual pattern for any scenario:
+
+Terminal A:
+
+```bash
+python3 -m mockllm.server --scenario SXX --port 8000
+```
+
+Terminal B:
+
+```bash
+python3 -m agent.user \
+  --db runs/live-sXX.db \
+  --server-url http://127.0.0.1:8000/chat \
+  run --run-id live-sXX --task "exercise SXX"
+```
+
+Replace `SXX` with `S01` through `S12`. Use lowercase in file names if preferred, but
+keep the mock server scenario uppercase. Stop the server with `Ctrl-C` before switching
+to another scenario.
+
+Expected local behavior:
+
+| Scenario | Expected outcome |
+| --- | --- |
+| S01 | Run finishes and writes `workspace/mock_s01.txt` with content `ok`. |
+| S02 | Run finishes after malformed tool arguments are converted into legible tool errors. |
+| S03 | Run finishes after unknown-tool and wrong-typed-argument errors are isolated. |
+| S04 | Run finishes in bounded time with `NoProgressError: same tool call repeated without progress`. |
+| S05 | Run finishes legibly with `NetworkFailureError` after interrupted response handling. |
+| S06 | Runtime retries `429`/`529` responses and then finishes. |
+| S07 | Prompt-injection file content remains untrusted data; run finishes with zero sent emails. |
+| S08 | Oversized context terminates with `ContextLimitExceededError`. |
+| S09 | Duplicate tool IDs and duplicate logical email send produce exactly one email row. |
+| S10 | Parallel starts are recorded before results; one failing and one hanging tool do not corrupt the run. |
+| S11 | False success claim after a failed tool result terminates with `ModelContradictionError`. |
+| S12 | Partial interrupted tool-call turn terminates with `PartialToolTurnError` and does not execute incomplete calls. |
 
 ## Configuration
 
@@ -161,7 +376,7 @@ http_allow_hosts:
   - 127.0.0.1
 ```
 
-The loader in `agent/runtime.py` validates and coerces the YAML values into
+The loader in `agent/runtime.py` validates and coerces YAML values into
 `RuntimeConfig`. Path values remain relative to the process working directory.
 `token_budget` limits the compacted context window and is capped at the required
 8,000-token ceiling measured by `mockllm/tokenizer.py`; smaller values are useful for
@@ -169,6 +384,8 @@ tests. `cost_budget_tokens` is a cumulative simulated run-cost ceiling charged f
 deterministic request and response token counts.
 
 ## Evals And Tests
+
+Direct commands:
 
 ```bash
 python3 -m pytest
@@ -182,6 +399,7 @@ expected-failure explanations live in `evals/cases.py`. The current baseline is:
 - 18 total cases
 - 16 passing cases
 - 2 expected failures
+- 0 unexpected failures
 - pass rate 0.889
 
 Two passing evals (`I01` and `I02`) exercise the runtime through the real HTTP client
@@ -199,12 +417,25 @@ Every run persists state and events to SQLite through `agent/run.py`. Structured
 traces are written under `runs/traces/` and can be replayed without the mock server:
 
 ```bash
-agent replay <actual_run_id>
 python3 -m agent.user replay <actual_run_id>
+agent replay <actual_run_id>
 ```
 
 Replay reconstructs recorded model/tool/final decisions from the JSONL trace only. It
 does not contact the model server, execute tools, or repeat side effects.
+
+Useful inspection commands:
+
+```bash
+python3 - <<'PY'
+import sqlite3
+conn = sqlite3.connect("runs/agent_events.db")
+for row in conn.execute("SELECT run_id, status, step_count, termination_reason FROM runs"):
+    print(row)
+PY
+
+tail -n 20 runs/traces/<actual_run_id>.jsonl
+```
 
 ## Time Log
 
@@ -225,23 +456,6 @@ python3 scripts/timelog.py record --duration-hours 0.25 --note "write-up"
 Command durations are rounded up to the nearest `0.05h` and merged into one row per
 local date.
 
-## Chaos Harness
-
-```bash
-python3 harness/chaos.py \
-  --attempts 100 \
-  --db runs/chaos.db \
-  --run-id chaos-r2 \
-  --task "send exactly one email" \
-  --server-url http://localhost:8000/chat \
-  --assert-email-count 1
-```
-
-In agent chaos mode the helper starts the deterministic run once, resumes it on later
-attempts, kills children with `SIGKILL`, then performs a final resume and checks the
-SQLite `sent_emails` count. The older raw-command mode is still available with
-`python3 harness/chaos.py -- <command...>`.
-
 ## What Works
 
 - Durable finite-state loop with SQLite run state and append-only events.
@@ -253,8 +467,6 @@ SQLite `sent_emails` count. The older raw-command mode is still available with
 - Interrupted partial tool turns terminate legibly without executing incomplete batches.
 - Tool boundary for file, Python, HTTP, and email tools.
 - Tool results are wrapped as untrusted data before returning to the model.
-- Explicit tool registry in `agent/executer.py` exposes `read_file`, `write_file`,
-  `run_python`, `http_get`, and `send_email`.
 - Workspace path confinement and HTTP host allow-listing.
 - `send_email` is blocked after untrusted tool-result data enters the conversation.
 - Visible red-team injection cases live in `harness/redteam/`.
@@ -262,17 +474,5 @@ SQLite `sent_emails` count. The older raw-command mode is still available with
 - JSONL traces and offline replay.
 - Retry, backoff, `Retry-After`, and circuit breaker support for mock-server calls.
 - YAML-backed runtime defaults.
-- Local stdlib mock server for S1-S12 smoke tests.
+- Local stdlib mock server for S01-S12 smoke tests.
 - Automatic assessment time logging through Makefile targets.
-
-## Known Gaps
-
-- The local mock server is a compatibility shim; final parity still needs the official
-  assessment mock server if it differs from these documented behaviours. `make live-scenarios`
-  verifies local live S01-S12 behavior.
-- `run_python` can still create workspace files that are not transactionally rolled back.
-- A queued `send_email` cannot be rolled back if a later email in the same batch fails.
-- `run_python` blocks network by monkey-patching `socket` inside isolated Python, not by
-  OS-level network namespace/seccomp policy.
-- The local chaos helper is lighter than a full `kill -9` durability test.
-- Part B is not implemented in this Part A submission.
