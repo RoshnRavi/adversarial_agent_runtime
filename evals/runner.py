@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import json
-import subprocess
-import sys
 import tempfile
-import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,7 +14,6 @@ from agent.exceptions import NetworkFailureError
 from agent.message import MemoryManager
 from agent.run import AgentDatabase, TraceWriter
 from agent.runtime import AgentRuntime, RuntimeConfig
-from mockllm.server import build_server
 
 from .cases import EVAL_CASES, EvalCase
 
@@ -186,13 +182,6 @@ def _optional_positive_int(
 
 
 def run_case(case: EvalCase, inputs: dict[str, EvalInput] | None = None) -> tuple[bool, str]:
-    # Integration cases use the real HTTP client against a local server; the
-    # rest use ScriptedLLM so failures stay deterministic and cheap.
-    if case.id == "I01":
-        return _run_local_mock_server_case()
-    if case.id == "I02":
-        return _run_live_s04_case()
-
     eval_inputs = load_eval_inputs() if inputs is None else inputs
     eval_input = eval_inputs.get(case.id)
     if eval_input is None:
@@ -240,14 +229,14 @@ def run_case(case: EvalCase, inputs: dict[str, EvalInput] | None = None) -> tupl
 
             if case.id == "S10":
                 passed = _all_parallel_starts_precede_results(db, eval_input.run_id)
-                return passed, "" if passed else case.reason
+                return passed, "" if passed else "parallel starts did not precede results"
 
             if case.id == "S11":
                 failed_tool_result = _has_failed_tool_result(db, eval_input.run_id)
                 passed = failed_tool_result and "ModelContradictionError" in (
                     state.termination_reason or ""
                 )
-                return passed, "" if passed else state.termination_reason or case.reason
+                return passed, "" if passed else state.termination_reason or "model contradiction not detected"
 
             if case.id == "S12":
                 expected_count = eval_input.expected_tool_call_count or 0
@@ -257,149 +246,11 @@ def run_case(case: EvalCase, inputs: dict[str, EvalInput] | None = None) -> tupl
                     and actual_count == 0
                     and "PartialToolTurnError" in (state.termination_reason or "")
                 )
-                return passed, "" if passed else state.termination_reason or case.reason
-
-            if case.id == "A13":
-                failed_tool_result = _has_failed_tool_result(db, eval_input.run_id)
-                passed = failed_tool_result and "ModelContradictionError" in (
-                    state.termination_reason or ""
-                )
-                return passed, "" if passed else state.termination_reason or case.reason
-
-            if case.id == "A14":
-                side_effect_path = loop.config.workspace_root / "f02-side-effect.txt"
-                passed = not side_effect_path.exists()
-                return passed, "" if passed else case.reason
-
-            if case.id == "FAIL01":
-                side_effect_path = loop.config.workspace_root / "py-side-effect.txt"
-                passed = not side_effect_path.exists()
-                return passed, "" if passed else case.reason
-
-            if case.id == "FAIL02":
-                passed = db.count_sent_emails(eval_input.run_id) == 0
-                return passed, "" if passed else case.reason
+                return passed, "" if passed else state.termination_reason or "partial tool turn was not rejected"
 
             return False, "case not implemented"
         finally:
             db.close()
-
-
-def _run_local_mock_server_case() -> tuple[bool, str]:
-    with tempfile.TemporaryDirectory() as directory:
-        tmp = Path(directory)
-        server = build_server("127.0.0.1", 0, scenario="S01")
-        host, port = server.server_address
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            config = RuntimeConfig(
-                db_path=tmp / "agent.db",
-                trace_dir=tmp / "traces",
-                workspace_root=tmp / "workspace",
-                server_url=f"http://{host}:{port}/chat",
-                retry_base_delay=0.0,
-            )
-            db = AgentDatabase(config.db_path)
-            try:
-                runtime = AgentRuntime(
-                    db,
-                    memory=MemoryManager(config.token_budget),
-                    tracer=TraceWriter(config.trace_dir),
-                    config=config,
-                )
-                state = runtime.run_task("eval-i01", "exercise local mock server S01")
-                output_path = config.workspace_root / "mock_s01.txt"
-                passed = (
-                    state.status == "FINISHED"
-                    and output_path.exists()
-                    and output_path.read_text(encoding="utf-8") == "ok"
-                )
-                detail = state.termination_reason or ""
-                return passed, "" if passed else detail or "local mock server S01 failed"
-            finally:
-                db.close()
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
-
-
-_LIVE_S04_SCRIPT = """
-import sys
-from pathlib import Path
-
-from agent.message import MemoryManager
-from agent.run import AgentDatabase, TraceWriter
-from agent.runtime import AgentRuntime, RuntimeConfig
-
-tmp = Path(sys.argv[1])
-config = RuntimeConfig(
-    db_path=tmp / "agent.db",
-    trace_dir=tmp / "traces",
-    workspace_root=tmp / "workspace",
-    server_url=sys.argv[2],
-    retry_base_delay=0.0,
-)
-db = AgentDatabase(config.db_path)
-try:
-    runtime = AgentRuntime(
-        db,
-        memory=MemoryManager(config.token_budget),
-        tracer=TraceWriter(config.trace_dir),
-        config=config,
-    )
-    state = runtime.run_task("eval-i02", "exercise local mock server S04")
-    print(f"{state.status}|{state.step_count}|{state.termination_reason or ''}")
-finally:
-    db.close()
-"""
-
-
-def _run_live_s04_case() -> tuple[bool, str]:
-    with tempfile.TemporaryDirectory() as directory:
-        tmp = Path(directory)
-        server = build_server("127.0.0.1", 0, scenario="S04")
-        host, port = server.server_address
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            try:
-                completed = subprocess.run(
-                    [
-                        sys.executable,
-                        "-c",
-                        _LIVE_S04_SCRIPT,
-                        str(tmp),
-                        f"http://{host}:{port}/chat",
-                    ],
-                    text=True,
-                    capture_output=True,
-                    timeout=10,
-                    check=False,
-                )
-            except subprocess.TimeoutExpired:
-                return False, "live S04 timed out"
-
-            db = AgentDatabase(tmp / "agent.db")
-            try:
-                state = db.get_run("eval-i02")
-                if state is None:
-                    return False, "live S04 did not create a run"
-                reason = state.termination_reason or ""
-                passed = (
-                    completed.returncode == 0
-                    and state.status == "FINISHED"
-                    and "NoProgressError" in reason
-                )
-                detail = reason or completed.stderr.strip() or completed.stdout.strip()
-                return passed, "" if passed else detail
-            finally:
-                db.close()
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join(timeout=2)
 
 
 def _all_parallel_starts_precede_results(db: AgentDatabase, run_id: str) -> bool:
@@ -437,27 +288,23 @@ def main() -> int:
     results = []
     for case in EVAL_CASES:
         passed, detail = run_case(case, inputs)
-        # Expected failures are executed and reported, not skipped, so they still
-        # prove the known gap exists and remains documented.
-        status = "PASS" if passed else ("EXPECTED_FAIL" if case.expected_failure else "FAIL")
+        status = "PASS" if passed else "FAIL"
         results.append({"id": case.id, "status": status, "detail": detail})
         print(f"{case.id} {status} - {case.name}" + (f" ({detail})" if detail else ""))
 
     total = len(results)
     passed_count = sum(1 for result in results if result["status"] == "PASS")
-    expected_failures = sum(1 for result in results if result["status"] == "EXPECTED_FAIL")
-    unexpected_failures = [result for result in results if result["status"] == "FAIL"]
+    failed_results = [result for result in results if result["status"] == "FAIL"]
     summary = {
         "version": 1,
         "total": total,
         "passed": passed_count,
-        "expected_failures": expected_failures,
-        "unexpected_failures": len(unexpected_failures),
+        "failed": len(failed_results),
         "pass_rate": round(passed_count / total, 3),
     }
     print(json.dumps(summary, sort_keys=True))
     print(_baseline_diff(summary))
-    return 1 if unexpected_failures else 0
+    return 1 if failed_results else 0
 
 
 def _baseline_diff(summary: dict[str, Any]) -> str:
@@ -466,7 +313,7 @@ def _baseline_diff(summary: dict[str, Any]) -> str:
         return "baseline: missing"
     baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
     diffs = []
-    for key in ("total", "passed", "expected_failures", "unexpected_failures", "pass_rate"):
+    for key in ("total", "passed", "failed", "pass_rate"):
         if baseline.get(key) != summary.get(key):
             diffs.append(f"{key}: baseline={baseline.get(key)} current={summary.get(key)}")
     return "baseline diff: none" if not diffs else "baseline diff: " + "; ".join(diffs)

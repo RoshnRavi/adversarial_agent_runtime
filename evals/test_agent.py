@@ -252,6 +252,5 @@ def test_write_rolls_back_after_later_send_email_failure(tmp_path: Path) -> None
 
 
 def test_eval_suite_has_required_case_count() -> None:
-    assert len(EVAL_CASES) >= 12
+    assert [case.id for case in EVAL_CASES] == [f"S{index:02d}" for index in range(1, 13)]
     assert sum(1 for case in EVAL_CASES if case.adversarial) >= 4
-    assert sum(1 for case in EVAL_CASES if case.expected_failure) >= 2

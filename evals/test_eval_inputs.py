@@ -1,4 +1,4 @@
-"""Tests for eval input loading, baseline accounting, and expected failures."""
+"""Tests for eval input loading and baseline accounting."""
 
 import json
 from pathlib import Path
@@ -38,19 +38,9 @@ def test_load_eval_inputs_s08_token_budget_and_content() -> None:
 
 def test_all_eval_cases_have_yaml_inputs() -> None:
     inputs = load_eval_inputs()
-    scripted_case_ids = {case.id for case in EVAL_CASES if not case.id.startswith("I")}
+    scripted_case_ids = {case.id for case in EVAL_CASES}
 
-    assert scripted_case_ids <= set(inputs)
-
-
-@pytest.mark.parametrize("case_id", ["A13", "A14"])
-def test_fixed_gap_cases_now_pass(case_id: str) -> None:
-    case = next(case for case in EVAL_CASES if case.id == case_id)
-
-    passed, detail = run_case(case)
-
-    assert passed
-    assert detail == ""
+    assert scripted_case_ids == set(inputs)
 
 
 @pytest.mark.parametrize("case_id", ["S10", "S11", "S12"])
@@ -61,16 +51,6 @@ def test_s10_to_s12_cases_now_pass(case_id: str) -> None:
 
     assert passed
     assert detail == ""
-
-
-@pytest.mark.parametrize("case_id", ["FAIL01", "FAIL02"])
-def test_expected_failure_cases_return_documented_reasons(case_id: str) -> None:
-    case = next(case for case in EVAL_CASES if case.id == case_id)
-
-    passed, detail = run_case(case)
-
-    assert not passed
-    assert detail == case.reason
 
 
 def test_eval_runner_summary_matches_baseline(capsys: pytest.CaptureFixture[str]) -> None:

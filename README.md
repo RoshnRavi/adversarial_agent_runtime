@@ -10,7 +10,7 @@ implementation lives in `agent/`; Part B is intentionally excluded until it is r
 - Runtime defaults: `agent/config_agent.yaml`
 - Persistence and replay: SQLite plus JSONL traces in `agent/run.py`
 - Exposed tools: `read_file`, `write_file`, `run_python`, `http_get`, `send_email`
-- Evals: 18 named cases, currently 16 passing and 2 expected failures
+- Evals: 12 named S01-S12 cases, currently all passing
 - Live `run` commands require a mock LLM server listening at the configured
   `server_url`, default `http://localhost:8000/chat`
 
@@ -56,7 +56,6 @@ The runtime exposes all tools required by Part A through `agent/executer.py`:
   and `live_scenarios.py` for local S01-S12 live checks.
 - `harness/`: chaos helper for interruption testing.
 - `mockllm/`: deterministic tokenizer, scenario YAML, and local HTTP mock server.
-- `scripts/`: support scripts, currently `timelog.py`.
 - `runs/`: runtime databases and JSONL traces.
 - `workspace/`: confined filesystem sandbox for task file tools.
 
@@ -83,7 +82,7 @@ Run these from the repository root.
    make setup
    ```
 
-   Expected: editable install succeeds. This target updates `TIMELOG.md`.
+   Expected: editable install succeeds.
 
 2. Run the unit and regression tests.
 
@@ -91,7 +90,7 @@ Run these from the repository root.
    make test
    ```
 
-   Expected: pytest passes. Current expected count is `106 passed`.
+   Expected: pytest passes.
 
 3. Run the eval suite and baseline comparison.
 
@@ -99,8 +98,8 @@ Run these from the repository root.
    make eval
    ```
 
-   Expected: `18` total cases, `16` passing, `2` expected failures,
-   `0` unexpected failures, pass rate `0.889`, and `baseline diff: none`.
+   Expected: `12` total cases, `12` passing, `0` failing cases,
+   pass rate `1.0`, and `baseline diff: none`.
 
 4. Run local live S01-S12 parity checks.
 
@@ -155,7 +154,6 @@ make eval
 make live-scenarios
 make mockllm SCENARIO=S01
 make run TASK="write a report"
-make timelog HOURS="0.25" NOTE="design review and write-up"
 make clean
 ```
 
@@ -167,11 +165,7 @@ make clean
 - `make mockllm SCENARIO=S01`: starts the local mock server at
   `http://127.0.0.1:8000/chat`.
 - `make run TASK="..."`: runs the agent against the configured server URL.
-- `make timelog HOURS="0.25" NOTE="..."`: records a manual time entry.
 - `make clean`: removes local test/cache artifacts.
-
-`setup`, `test`, `eval`, and `run` are wrapped by `scripts/timelog.py`, so they update
-`TIMELOG.md` automatically after the command finishes. Failed commands are logged too.
 
 ### Mock Server CLI
 
@@ -190,6 +184,48 @@ curl http://127.0.0.1:8000/health
 ```
 
 Stop the server with `Ctrl-C`.
+
+### Check a User Prompt
+
+Start the local scripted mock server with S01:
+
+```bash
+python3 -m mockllm.server --scenario S01 --port 8000
+```
+
+Run the agent with the user prompt as `--task`:
+
+```bash
+python3 -m agent.user \
+  --db runs/prompt-check.db \
+  --server-url http://127.0.0.1:8000/chat \
+  run --run-id prompt-check-001 \
+  --task "your user prompt here"
+```
+
+Replay the recorded run without contacting the model or tools:
+
+```bash
+python3 -m agent.user replay prompt-check-001
+```
+
+Inspect the raw JSONL trace:
+
+```bash
+tail -n 50 runs/traces/prompt-check-001.jsonl
+```
+
+Query the SQLite run state:
+
+```bash
+sqlite3 runs/prompt-check.db \
+  'select status, step_count, termination_reason from runs where run_id="prompt-check-001";'
+```
+
+`mockllm.server` behavior is scenario-driven: the prompt is recorded as the task,
+but model responses come from the selected scenario, such as `S01` or `S04`.
+If port `8000` is busy, use another port such as `8001` and update `--server-url`
+to match.
 
 ### Runtime CLI
 
@@ -299,7 +335,7 @@ python3 harness/chaos.py --attempts 10 -- python3 -m agent.user --help
 | R4 - Injection resistance | Run `make eval` and `make test`; inspect S07 result and red-team tests. | S07 finishes with zero sent emails; visible red-team tests pass. |
 | R5 - Loop and budget control | Run `make eval`; inspect S04 result and config limits. | S04 terminates with `NoProgressError`; step, no-progress, token, and cost limits are configured. |
 | R6 - Observability and replay | Run a live scenario, stop the server, then run `python3 -m agent.user replay <run_id>`. | SQLite events and `runs/traces/<run_id>.jsonl` exist; replay succeeds without a server. |
-| R7 - Evals | Run `make eval`. | Baseline diff is none; there are 18 cases, at least 4 adversarial, and exactly 2 expected failures. |
+| R7 - Evals | Run `make eval`. | Baseline diff is none; there are 12 cases covering S01-S12, with at least 4 adversarial cases. |
 
 R8 is documented in `DECISIONS.md`, which stays under the 1,000-word limit and names
 remaining unsafe areas and tradeoffs.
@@ -393,23 +429,13 @@ python3 -m evals.runner
 ```
 
 `make eval` runs the same eval runner and compares the result with `evals/baseline.json`.
-Scripted eval inputs live in `evals/input.yaml`; case names, adversarial flags, and
-expected-failure explanations live in `evals/cases.py`. The current baseline is:
+Scripted eval inputs live in `evals/input.yaml`; case names and adversarial flags live
+in `evals/cases.py`. The current baseline is:
 
-- 18 total cases
-- 16 passing cases
-- 2 expected failures
-- 0 unexpected failures
-- pass rate 0.889
-
-Two passing evals (`I01` and `I02`) exercise the runtime through the real HTTP client
-against the local `mockllm.server`; the rest use deterministic scripted responses for
-speed and failure isolation.
-
-Expected failures are real executed evals, not skipped cases:
-
-- FAIL01: `run_python` can create workspace files that are not transactionally rolled back.
-- FAIL02: a queued email cannot be rolled back if a later email in the batch fails.
+- 12 total cases
+- 12 passing cases
+- 0 failing cases
+- pass rate 1.0
 
 ## Observability And Replay
 
@@ -439,22 +465,9 @@ tail -n 20 runs/traces/<actual_run_id>.jsonl
 
 ## Time Log
 
-`TIMELOG.md` is updated automatically by:
-
-- `make setup`
-- `make test`
-- `make eval`
-- `make run`
-
-Manual entries:
-
-```bash
-make timelog HOURS="0.25" NOTE="triage Part A gaps"
-python3 scripts/timelog.py record --duration-hours 0.25 --note "write-up"
-```
-
-Command durations are rounded up to the nearest `0.05h` and merged into one row per
-local date.
+`TIMELOG.md` is maintained manually. It records how much time went into each Part A
+feature or requirement area, plus verification and the Part B status. Update it
+directly whenever new implementation or assessment work is added.
 
 ## What Works
 

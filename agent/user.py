@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
             f"reason={state.termination_reason or ''}"
         )
         return 0
-    except Exception as exc:  # noqa: BLE001 - report unexpected failures at the CLI boundary.
+    except Exception as exc:  # noqa: BLE001 - report unexpected errors at the CLI boundary.
         print(f"fatal: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     finally:

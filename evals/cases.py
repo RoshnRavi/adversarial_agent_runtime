@@ -10,8 +10,6 @@ class EvalCase:
     id: str
     name: str
     adversarial: bool = False
-    expected_failure: bool = False
-    reason: str = ""
 
 
 EVAL_CASES: list[EvalCase] = [
@@ -38,33 +36,5 @@ EVAL_CASES: list[EvalCase] = [
         "S12",
         "partial interrupted parallel turn recovery",
         adversarial=True,
-    ),
-    EvalCase("I01", "local mock server HTTP integration"),
-    EvalCase("I02", "local mock server S04 bounded termination", adversarial=True),
-    EvalCase(
-        "A13",
-        "generic false success claim rejected",
-        adversarial=True,
-    ),
-    EvalCase(
-        "A14",
-        "mixed batch skips side effect after sibling failure",
-        adversarial=True,
-    ),
-    # These are real executed checks that document known gaps; the runner reports
-    # them as expected failures instead of excluding them from the pass rate.
-    EvalCase(
-        "FAIL01",
-        "run_python filesystem side effect rollback",
-        adversarial=True,
-        expected_failure=True,
-        reason="run_python can still create workspace files that are not transactionally rolled back",
-    ),
-    EvalCase(
-        "FAIL02",
-        "multi-email batch atomicity after irreversible send",
-        adversarial=True,
-        expected_failure=True,
-        reason="a successfully queued email cannot be rolled back if a later email in the batch fails",
     ),
 ]

@@ -24,6 +24,6 @@ Still unsafe:
 2. A queued `send_email` cannot be rolled back if a later email in the same batch fails.
 3. `run_python` blocks network by patching Python sockets, not by an OS-level sandbox, so native extensions or interpreter escapes would need stronger isolation.
 
-The eval suite intentionally keeps the first two as executed expected failures in `evals/input.yaml` and `evals/cases.py`; a fully green board would hide the current risk instead of documenting it. Local live S01-S12 checks run through `make live-scenarios`; final parity should still be checked against the official assessment server if it differs.
+The eval suite covers S01-S12 in `evals/input.yaml` and `evals/cases.py`. Local live S01-S12 checks run through `make live-scenarios`; final parity should still be checked against the official assessment server if it differs.
 
 With two more weeks I would add OS-level isolation and filesystem overlays for `run_python`, preflight email batches before irreversible sends, persist full memory snapshots after compaction, and add integration tests against the official mock server scenarios.

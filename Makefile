@@ -1,29 +1,25 @@
 PYTHON ?= $(shell python3 --version >/dev/null 2>&1 && echo python3 || echo python)
 PIP ?= $(PYTHON) -m pip
-TIMELOG ?= $(PYTHON) scripts/timelog.py
 
-.PHONY: setup test eval live-scenarios run mockllm timelog clean
+.PHONY: setup test eval live-scenarios run mockllm clean
 
 setup:
-	$(TIMELOG) run --note "make setup" -- $(PIP) install -e ".[dev]"
+	$(PIP) install -e ".[dev]"
 
 test:
-	$(TIMELOG) run --note "make test" -- $(PYTHON) -m pytest
+	$(PYTHON) -m pytest
 
 eval:
-	$(TIMELOG) run --note "make eval" -- $(PYTHON) -m evals.runner
+	$(PYTHON) -m evals.runner
 
 live-scenarios:
 	$(PYTHON) -m evals.live_scenarios
 
 run:
-	$(TIMELOG) run --note "make run: $(TASK)" -- $(PYTHON) -m agent.user run --task "$(TASK)"
+	$(PYTHON) -m agent.user run --task "$(TASK)"
 
 mockllm:
 	$(PYTHON) -m mockllm.server --scenario "$(or $(SCENARIO),S01)"
-
-timelog:
-	$(TIMELOG) record --duration-hours "$(HOURS)" --note "$(NOTE)"
 
 clean:
 	rm -rf .pytest_cache .ruff_cache htmlcov
