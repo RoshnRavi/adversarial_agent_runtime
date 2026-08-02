@@ -11,7 +11,5 @@
 | Observability and replay | R6 | 0.70h | Added JSONL traces and replay support from recorded state. |
 | Evals | R7 | 1.10h | Added S01-S12 eval cases, baseline comparison, and local live scenario checks. |
 | Write-up | R8 | 0.45h | Wrote README and DECISIONS documentation. |
-| Verification | Part A checks | 0.35h | Ran tests, evals, setup checks, and live scenario checks. |
-| Part B | Not started | 0.00h | Part B is intentionally not implemented until released. |
 
 
